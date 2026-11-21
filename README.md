@@ -1,36 +1,81 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Nunca Foi ICPC — Painel de Estudos e Treino para Maratona / ICPC
 
-## Getting Started
+Plataforma web full-stack para equipes de programação competitiva (como a equipe **Nunca Foi Sort()**) registrarem progresso de estudos, lista de revisão automática e problemas propostos entre membros, com **Painel de Administrador Global** e **ativação de contas com validação de e-mail**.
 
-First, run the development server:
+---
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## Funcionalidades
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- **Administrador Global (`/admin`) & Onboarding por E-mail:**
+  - O Administrador Global cria, edita e exclui equipes e cadastra novos usuários informando nome e e-mail (sem definir a senha pelo usuário).
+  - Ao cadastrar um usuário, o sistema gera um **código de verificação de 6 dígitos** e um **link único de ativação** (`/ativar?token=...`, válido por 24h) enviados por e-mail.
+  - O usuário acessa o link, confirma o código recebido no e-mail e cria sua própria senha.
+- **Isolamento Multi-Equipes:**
+  - Cada equipe visualiza apenas suas próprias questões, revisões, membros e propostas.
+- **Registro de Questões (`/questoes`):**
+  - Título, link (detecção automática de Codeforces, LeetCode, AtCoder, Beecrowd, CSES ou Outro), múltiplos tópicos (20 tópicos clássicos globais + criação livre), dificuldade percebida, toggle **"Conseguiu fazer?"** e observações.
+- **Lista de Revisão Automática (`/revisao`):**
+  - Qualquer questão registrada com **"Conseguiu fazer?" = Não** entra automaticamente na lista de revisão da equipe.
+- **Problemas Propostos e Notificações (`/propostos` e `/notificacoes`):**
+  - Proposição de desafios para colegas da mesma equipe (`Pendente` → `Visualizado` → `Tentou` / `Feito` / `Descartado`), criando registro automático na lista de revisão em caso de `Tentou` e notificações in-app.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Stack Tecnológica
 
-## Learn More
+- **Frontend & Backend:** Next.js 16 (App Router, Server Components, Server Actions) + TypeScript
+- **Estilização:** Tailwind CSS v4 + Lucide Icons
+- **Banco de Dados & ORM:** PostgreSQL + Prisma ORM (v6)
+- **E-mail:** Resend HTTP API ou SMTP (`nodemailer`), com fallback de preview local em desenvolvimento
+- **Autenticação:** Sessão HTTP-only com JWT (`jose`) e hash de senha (`bcryptjs`)
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Rodando Localmente (PostgreSQL Local)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. **Instale as dependências:**
+   ```bash
+   npm install
+   ```
 
-## Deploy on Vercel
+2. **Configure `.env`:**
+   ```env
+   DATABASE_URL="postgresql://postgres:1234@localhost:5432/nunca_foi_sort?schema=public"
+   AUTH_SECRET="uma-chave-secreta-longa"
+   APP_URL="http://localhost:3000"
+   ADMIN_NAME="Admin Global"
+   ADMIN_EMAIL="seu-email@dominio.com"
+   ADMIN_PASSWORD="sua-senha-segura"
+   ```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+   Para envio real de e-mails com código de verificação, configure **uma** das opções no `.env`:
+   - **Resend:** `RESEND_API_KEY` e `EMAIL_FROM`
+   - **SMTP (ex: Gmail com Senha de App):** `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` e `EMAIL_FROM`
+   - *(Sem essas variáveis, o painel `/admin` exibe um preview local com o código de 6 dígitos e o link `/ativar?token=...` para testes sem precisar de SMTP).*
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+3. **Sincronize o banco e execute o seed:**
+   ```bash
+   npx prisma db push
+   npm run db:seed
+   ```
+   O seed cria apenas os 20 tópicos clássicos e o **Administrador Global** configurado em `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+
+4. **Inicie o servidor de desenvolvimento:**
+   ```bash
+   npm run dev
+   ```
+   Acesse `http://localhost:3000`.
+
+---
+
+## Deploy na Vercel com Neon Postgres (Gratuito)
+
+1. Suba o repositório para o GitHub (`.env` permanece ignorado no `.gitignore`).
+2. Importe o projeto na Vercel e adicione **Storage → Neon (Serverless Postgres)** para obter `DATABASE_URL` automaticamente.
+3. Configure nas Environment Variables da Vercel: `AUTH_SECRET`, `APP_URL` (ex: `https://seu-app.vercel.app`), `ADMIN_EMAIL`, `ADMIN_PASSWORD`, e seu provedor de e-mail (`RESEND_API_KEY` ou `SMTP_*`).
+4. Com a `DATABASE_URL` do Neon, execute uma vez:
+   ```bash
+   npx prisma db push
+   npx prisma db seed
+   ```
+5. Faça o deploy na Vercel.

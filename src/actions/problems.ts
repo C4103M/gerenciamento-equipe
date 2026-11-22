@@ -5,6 +5,7 @@ import { revalidatePath, updateTag } from "next/cache";
 import { requireTeamMember } from "@/lib/auth";
 import { CACHE_TAGS } from "@/lib/cache";
 import { parseCodeforcesRef } from "@/lib/codeforces";
+import { parseLeetCodeRef } from "@/lib/leetcode";
 import { NotificationService } from "@/lib/notifications";
 import { detectPlatform } from "@/lib/platform";
 import { prisma } from "@/lib/prisma";
@@ -33,6 +34,10 @@ function resolveProblemReference(
   const cfRef = parseCodeforcesRef(rawUrl);
   if (cfRef) {
     return { url: cfRef.canonicalUrl, externalId: cfRef.externalId };
+  }
+  const lcRef = parseLeetCodeRef(rawUrl);
+  if (lcRef) {
+    return { url: lcRef.canonicalUrl, externalId: lcRef.externalId };
   }
   const safeUrl = sanitizeHttpUrl(rawUrl);
   if (!safeUrl) {

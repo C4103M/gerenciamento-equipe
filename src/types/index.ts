@@ -21,6 +21,7 @@ export interface MemberSummary {
   cfHandle: string | null;
   lcHandle: string | null;
   cfLastSyncedAt?: string | null;
+  lcLastSyncedAt?: string | null;
   avatarColor: string;
   role?: UserRole;
   teamId?: string | null;

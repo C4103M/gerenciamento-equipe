@@ -29,7 +29,7 @@ import {
 } from "@/components/Badges";
 import { DIFFICULTY_META } from "@/lib/platform";
 import { cn, formatRelativeDate } from "@/lib/utils";
-import type { ProblemLogItem, TopicItem } from "@/types";
+import type { MemberSummary, ProblemLogItem, TopicItem } from "@/types";
 
 export interface ReviewProblemItem extends ProblemLogItem {
   fromProposalProposerName?: string | null;
@@ -46,7 +46,9 @@ export interface RevisaoClientProps {
   currentPage: number;
   pageSize: number;
   topics: TopicItem[];
+  members: MemberSummary[];
   initialScope: ReviewScope;
+  initialMemberId: string;
   initialTopicId: string;
   initialSearch: string;
 }
@@ -60,12 +62,16 @@ const DIFFICULTY_OPTIONS: Difficulty[] = [
 
 function buildRevisaoUrl(params: {
   scope: ReviewScope;
+  member: string;
   topic: string;
   q: string;
   page: number;
 }): string {
   const sp = new URLSearchParams();
   if (params.scope !== "mine") sp.set("scope", params.scope);
+  if (params.scope === "team" && params.member !== "all") {
+    sp.set("member", params.member);
+  }
   if (params.topic !== "all") sp.set("topic", params.topic);
   if (params.q) sp.set("q", params.q);
   if (params.page > 1) sp.set("page", String(params.page));
@@ -84,7 +90,9 @@ export function RevisaoClient({
   currentPage,
   pageSize,
   topics,
+  members,
   initialScope,
+  initialMemberId,
   initialTopicId,
   initialSearch,
 }: RevisaoClientProps) {
@@ -113,7 +121,9 @@ export function RevisaoClient({
   }, []);
 
   const hasActiveFilters =
-    initialTopicId !== "all" || initialSearch.length > 0;
+    initialTopicId !== "all" ||
+    initialSearch.length > 0 ||
+    (initialScope === "team" && initialMemberId !== "all");
 
   const totalPages = Math.max(1, Math.ceil(filteredCount / pageSize));
   const rangeStart = filteredCount === 0 ? 0 : (currentPage - 1) * pageSize + 1;
@@ -121,11 +131,16 @@ export function RevisaoClient({
 
   function updateQuery(patch: {
     scope?: ReviewScope;
+    member?: string;
     topic?: string;
     q?: string;
   }) {
+    const nextScope = patch.scope ?? initialScope;
+    const nextMember =
+      nextScope === "mine" ? "all" : (patch.member ?? initialMemberId);
     const url = buildRevisaoUrl({
-      scope: patch.scope ?? initialScope,
+      scope: nextScope,
+      member: nextMember,
       topic: patch.topic ?? initialTopicId,
       q: patch.q ?? initialSearch,
       page: 1,
@@ -152,7 +167,7 @@ export function RevisaoClient({
       debounceTimerRef.current = null;
     }
     setSearchQuery("");
-    updateQuery({ topic: "all", q: "" });
+    updateQuery({ member: "all", topic: "all", q: "" });
   }
 
   function goToPage(nextPage: number) {
@@ -160,6 +175,7 @@ export function RevisaoClient({
     if (clamped === currentPage) return;
     const url = buildRevisaoUrl({
       scope: initialScope,
+      member: initialMemberId,
       topic: initialTopicId,
       q: initialSearch,
       page: clamped,
@@ -248,8 +264,13 @@ export function RevisaoClient({
             </button>
           </div>
 
-          {/* Search & Topic Filter */}
-          <div className="flex flex-1 flex-col gap-2.5 sm:flex-row lg:max-w-xl">
+          {/* Search, Member & Topic Filter */}
+          <div
+            className={cn(
+              "flex flex-1 flex-col gap-2.5 sm:flex-row",
+              initialScope === "team" ? "lg:max-w-3xl" : "lg:max-w-xl"
+            )}
+          >
             <div className="relative flex-1">
               <Search
                 className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-zinc-500"
@@ -264,6 +285,28 @@ export function RevisaoClient({
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-950 py-2 pr-3 pl-9 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
               />
             </div>
+
+            {initialScope === "team" ? (
+              <div className="relative sm:w-48">
+                <Users
+                  className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500"
+                  aria-hidden="true"
+                />
+                <select
+                  value={initialMemberId}
+                  onChange={(e) => updateQuery({ member: e.target.value })}
+                  aria-label="Filtrar por membro"
+                  className="w-full appearance-none rounded-xl border border-zinc-800 bg-zinc-950 py-2 pr-8 pl-9 text-sm text-zinc-100 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
+                >
+                  <option value="all">Todos os membros</option>
+                  {members.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
 
             <div className="relative sm:w-52">
               <Filter

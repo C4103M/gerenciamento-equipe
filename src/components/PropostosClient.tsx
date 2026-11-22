@@ -40,9 +40,11 @@ export interface PropostosClientProps {
   currentUserId: string;
   currentUser: MemberSummary;
   proposals: ProposedProblemItem[];
+  members: MemberSummary[];
   teammates: MemberSummary[];
   topics: TopicItem[];
   initialTab?: string;
+  initialMemberId?: string;
   highlightId?: string;
 }
 
@@ -84,9 +86,11 @@ export function PropostosClient({
   currentUserId,
   currentUser,
   proposals,
+  members,
   teammates,
   topics,
   initialTab,
+  initialMemberId = "ALL",
   highlightId,
 }: PropostosClientProps) {
   const router = useRouter();
@@ -94,6 +98,7 @@ export function PropostosClient({
   const [activeTab, setActiveTab] = useState<ProposalsTab>(() =>
     resolveInitialTab(initialTab)
   );
+  const [memberFilter, setMemberFilter] = useState<string>(initialMemberId);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
   const [proposeModalMode, setProposeModalMode] = useState<
     "propose" | "self" | null
@@ -109,6 +114,14 @@ export function PropostosClient({
       el.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [highlightId]);
+
+  const recipientCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of proposals) {
+      counts.set(p.assigneeId, (counts.get(p.assigneeId) ?? 0) + 1);
+    }
+    return counts;
+  }, [proposals]);
 
   const tabCounts = useMemo(() => {
     let recebidos = 0;
@@ -143,9 +156,12 @@ export function PropostosClient({
       if (activeTab === "enviados") {
         return p.proposerId === currentUserId && !isSelfSaved;
       }
+      if (memberFilter !== "ALL") {
+        return p.assigneeId === memberFilter;
+      }
       return true;
     });
-  }, [proposals, activeTab, currentUserId]);
+  }, [proposals, activeTab, currentUserId, memberFilter]);
 
   const filteredProposals = useMemo(() => {
     if (statusFilter === "ALL") return tabProposals;
@@ -354,6 +370,56 @@ export function PropostosClient({
             </span>
           </button>
         </div>
+
+        {/* Recipient Filter Pills (Todos da Equipe tab) */}
+        {activeTab === "todos" ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-zinc-500">
+              Destinatário:
+            </span>
+            <button
+              type="button"
+              onClick={() => setMemberFilter("ALL")}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                memberFilter === "ALL"
+                  ? "border-indigo-500/50 bg-indigo-500/15 text-indigo-200"
+                  : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+              )}
+            >
+              <span>Todos</span>
+              <span className="font-mono text-[11px] opacity-75">
+                {proposals.length}
+              </span>
+            </button>
+            {members.map((member) => {
+              const active = memberFilter === member.id;
+              const count = recipientCounts.get(member.id) ?? 0;
+              return (
+                <button
+                  key={member.id}
+                  type="button"
+                  onClick={() =>
+                    setMemberFilter((prev) =>
+                      prev === member.id ? "ALL" : member.id
+                    )
+                  }
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                    active
+                      ? "border-indigo-500/50 bg-indigo-500/15 text-indigo-200"
+                      : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                  )}
+                >
+                  <span>{member.name}</span>
+                  <span className="font-mono text-[11px] opacity-75">
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
 
         {/* Status Filter Pills */}
         <div className="flex flex-wrap items-center gap-2">

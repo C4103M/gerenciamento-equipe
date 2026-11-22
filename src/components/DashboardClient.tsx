@@ -6,7 +6,8 @@ import { useState } from "react";
 import { PeriodFilterButton } from "@/components/PeriodFilterButton";
 import { ProblemFormModal } from "@/components/ProblemFormModal";
 import { ProposeProblemModal } from "@/components/ProposeProblemModal";
-import { buildPeriodQueryString, type PeriodFilterValue } from "@/lib/period";
+import { buildDashboardHref } from "@/lib/dashboard";
+import type { PeriodFilterValue } from "@/lib/period";
 import type { MemberSummary, TopicItem } from "@/types";
 
 export interface DashboardClientProps {
@@ -14,6 +15,7 @@ export interface DashboardClientProps {
   topics: TopicItem[];
   teammates: MemberSummary[];
   periodFilter: PeriodFilterValue;
+  selectedMemberId?: string | null;
 }
 
 /** Quick action buttons and modal controllers for the team dashboard header. */
@@ -22,14 +24,14 @@ export function DashboardClient({
   topics,
   teammates,
   periodFilter,
+  selectedMemberId = null,
 }: DashboardClientProps) {
   const router = useRouter();
   const [problemModalOpen, setProblemModalOpen] = useState(false);
   const [proposeModalOpen, setProposeModalOpen] = useState(false);
 
   function handlePeriodChange(next: PeriodFilterValue) {
-    const qs = buildPeriodQueryString(next);
-    router.push(qs ? `/${qs}` : "/");
+    router.push(buildDashboardHref(next, selectedMemberId), { scroll: false });
   }
 
   return (
@@ -74,6 +76,11 @@ export function DashboardClient({
         currentUser={currentUser}
         teammates={teammates}
         topics={topics}
+        defaultAssigneeIds={
+          selectedMemberId && selectedMemberId !== currentUser.id
+            ? [selectedMemberId]
+            : undefined
+        }
       />
     </>
   );

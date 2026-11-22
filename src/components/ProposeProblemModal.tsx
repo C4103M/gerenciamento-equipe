@@ -31,6 +31,7 @@ export interface ProposeProblemModalProps {
   topics: TopicItem[];
   currentUser?: MemberSummary;
   defaultSelfOnly?: boolean;
+  defaultAssigneeIds?: string[];
 }
 
 const SUGGESTED_DIFFICULTY_OPTIONS: Array<{
@@ -73,6 +74,7 @@ export function ProposeProblemModal({
   topics,
   currentUser,
   defaultSelfOnly = false,
+  defaultAssigneeIds,
 }: ProposeProblemModalProps) {
   if (!open) return null;
 
@@ -83,6 +85,7 @@ export function ProposeProblemModal({
       topics={topics}
       currentUser={currentUser}
       defaultSelfOnly={defaultSelfOnly}
+      defaultAssigneeIds={defaultAssigneeIds}
     />
   );
 }
@@ -93,12 +96,17 @@ function ProposeProblemContent({
   topics,
   currentUser,
   defaultSelfOnly = false,
+  defaultAssigneeIds,
 }: Omit<ProposeProblemModalProps, "open">) {
   const router = useRouter();
 
-  const [assigneeIds, setAssigneeIds] = useState<string[]>(() =>
-    defaultSelfOnly && currentUser ? [currentUser.id] : []
-  );
+  const [assigneeIds, setAssigneeIds] = useState<string[]>(() => {
+    if (defaultSelfOnly && currentUser) return [currentUser.id];
+    if (defaultAssigneeIds && defaultAssigneeIds.length > 0) {
+      return Array.from(new Set(defaultAssigneeIds));
+    }
+    return [];
+  });
   const [title, setTitle] = useState("");
   const [url, setUrl] = useState("");
   const [topicIds, setTopicIds] = useState<string[]>([]);

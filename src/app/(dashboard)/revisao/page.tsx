@@ -4,7 +4,7 @@ import {
   type ReviewProblemItem,
 } from "@/components/RevisaoClient";
 import { requireTeamMember } from "@/lib/auth";
-import { getCachedTopics } from "@/lib/cache";
+import { getCachedTeamMembers, getCachedTopics } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 
 const PAGE_SIZE = 20;
@@ -14,6 +14,7 @@ export default async function RevisaoPage({
 }: {
   searchParams: Promise<{
     scope?: string;
+    member?: string;
     topic?: string;
     q?: string;
     page?: string;
@@ -26,6 +27,7 @@ export default async function RevisaoPage({
 
   const scope: "mine" | "team" =
     resolvedParams.scope === "team" ? "team" : "mine";
+  const requestedMember = resolvedParams.member?.trim() || "all";
   const topic = resolvedParams.topic?.trim() || "all";
   const q = resolvedParams.q?.trim() ?? "";
 
@@ -33,35 +35,43 @@ export default async function RevisaoPage({
   const requestedPage =
     Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : 1;
 
-  const andConditions: Prisma.ProblemLogWhereInput[] = [
-    { needsReview: true, teamId: currentUser.teamId },
-  ];
+  function buildReviewWhere(memberId: string): Prisma.ProblemLogWhereInput {
+    const andConditions: Prisma.ProblemLogWhereInput[] = [
+      { needsReview: true, teamId: currentUser.teamId },
+    ];
 
-  if (scope === "mine") {
-    andConditions.push({ userId: currentUser.id });
-  }
-  if (topic !== "all") {
-    andConditions.push({ topics: { some: { id: topic } } });
-  }
-  if (q) {
-    andConditions.push({
-      OR: [
-        { title: { contains: q, mode: "insensitive" } },
-        { url: { contains: q, mode: "insensitive" } },
-        { notes: { contains: q, mode: "insensitive" } },
-        { user: { name: { contains: q, mode: "insensitive" } } },
-        { topics: { some: { name: { contains: q, mode: "insensitive" } } } },
-        {
-          fromProposals: {
-            some: { proposer: { name: { contains: q, mode: "insensitive" } } },
+    if (scope === "mine") {
+      andConditions.push({ userId: currentUser.id });
+    } else if (memberId !== "all") {
+      andConditions.push({ userId: memberId });
+    }
+    if (topic !== "all") {
+      andConditions.push({ topics: { some: { id: topic } } });
+    }
+    if (q) {
+      andConditions.push({
+        OR: [
+          { title: { contains: q, mode: "insensitive" } },
+          { url: { contains: q, mode: "insensitive" } },
+          { notes: { contains: q, mode: "insensitive" } },
+          { user: { name: { contains: q, mode: "insensitive" } } },
+          { topics: { some: { name: { contains: q, mode: "insensitive" } } } },
+          {
+            fromProposals: {
+              some: { proposer: { name: { contains: q, mode: "insensitive" } } },
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
+    }
+
+    return andConditions.length === 1
+      ? andConditions[0]
+      : { AND: andConditions };
   }
 
-  const where: Prisma.ProblemLogWhereInput =
-    andConditions.length === 1 ? andConditions[0] : { AND: andConditions };
+  const initialMemberQuery = scope === "team" ? requestedMember : "all";
+  const initialWhere = buildReviewWhere(initialMemberQuery);
 
   const reviewInclude = {
     user: {
@@ -93,31 +103,65 @@ export default async function RevisaoPage({
     },
   };
 
-  const [initialLogsRaw, filteredCount, myTotalCount, teamTotalCount, topics] =
-    await Promise.all([
-      prisma.problemLog.findMany({
-        where,
-        include: reviewInclude,
-        orderBy: { createdAt: "asc" },
-        take: PAGE_SIZE,
-        skip: (requestedPage - 1) * PAGE_SIZE,
-      }),
-      prisma.problemLog.count({ where }),
-      prisma.problemLog.count({
-        where: {
-          needsReview: true,
-          teamId: currentUser.teamId,
-          userId: currentUser.id,
-        },
-      }),
-      prisma.problemLog.count({
-        where: {
-          needsReview: true,
-          teamId: currentUser.teamId,
-        },
-      }),
-      getCachedTopics(),
-    ]);
+  const [
+    fetchedLogsRaw,
+    fetchedFilteredCount,
+    myTotalCount,
+    teamTotalCount,
+    topics,
+    teamMembers,
+  ] = await Promise.all([
+    prisma.problemLog.findMany({
+      where: initialWhere,
+      include: reviewInclude,
+      orderBy: { createdAt: "asc" },
+      take: PAGE_SIZE,
+      skip: (requestedPage - 1) * PAGE_SIZE,
+    }),
+    prisma.problemLog.count({ where: initialWhere }),
+    prisma.problemLog.count({
+      where: {
+        needsReview: true,
+        teamId: currentUser.teamId,
+        userId: currentUser.id,
+      },
+    }),
+    prisma.problemLog.count({
+      where: {
+        needsReview: true,
+        teamId: currentUser.teamId,
+      },
+    }),
+    getCachedTopics(),
+    getCachedTeamMembers(currentUser.teamId),
+  ]);
+
+  const validMemberId =
+    scope === "team" &&
+    requestedMember !== "all" &&
+    teamMembers.some((m) => m.id === requestedMember)
+      ? requestedMember
+      : "all";
+
+  const hasInvalidMemberParam =
+    scope === "team" && requestedMember !== "all" && validMemberId === "all";
+
+  const effectiveWhere = hasInvalidMemberParam
+    ? buildReviewWhere("all")
+    : initialWhere;
+
+  const [initialLogsRaw, filteredCount] = hasInvalidMemberParam
+    ? await Promise.all([
+        prisma.problemLog.findMany({
+          where: effectiveWhere,
+          include: reviewInclude,
+          orderBy: { createdAt: "asc" },
+          take: PAGE_SIZE,
+          skip: (requestedPage - 1) * PAGE_SIZE,
+        }),
+        prisma.problemLog.count({ where: effectiveWhere }),
+      ])
+    : [fetchedLogsRaw, fetchedFilteredCount];
 
   const totalPages = Math.max(1, Math.ceil(filteredCount / PAGE_SIZE));
   const currentPage = Math.min(requestedPage, totalPages);
@@ -125,7 +169,7 @@ export default async function RevisaoPage({
   const reviewLogsRaw =
     requestedPage > totalPages && filteredCount > 0
       ? await prisma.problemLog.findMany({
-          where,
+          where: effectiveWhere,
           include: reviewInclude,
           orderBy: { createdAt: "asc" },
           take: PAGE_SIZE,
@@ -167,7 +211,9 @@ export default async function RevisaoPage({
       currentPage={currentPage}
       pageSize={PAGE_SIZE}
       topics={topics}
+      members={teamMembers}
       initialScope={scope}
+      initialMemberId={validMemberId}
       initialTopicId={topic}
       initialSearch={q}
     />

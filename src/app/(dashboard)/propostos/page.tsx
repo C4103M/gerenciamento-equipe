@@ -7,7 +7,7 @@ import type { MemberSummary, ProposedProblemItem } from "@/types";
 export default async function PropostosPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; id?: string }>;
+  searchParams: Promise<{ tab?: string; id?: string; member?: string }>;
 }) {
   const [params, currentUser] = await Promise.all([
     searchParams,
@@ -76,15 +76,23 @@ export default async function PropostosPage({
     avatarColor: currentUser.avatarColor,
   };
 
+  const requestedMember = params.member?.trim();
+  const initialMemberId =
+    requestedMember && teamMembers.some((m) => m.id === requestedMember)
+      ? requestedMember
+      : "ALL";
+
   return (
     <PropostosClient
-      key={`${params.tab ?? "recebidos"}-${params.id ?? ""}`}
+      key={`${params.tab ?? "recebidos"}-${params.id ?? ""}-${initialMemberId}`}
       currentUserId={currentUser.id}
       currentUser={currentUserSummary}
       proposals={proposals}
+      members={teamMembers}
       teammates={teammates}
       topics={topics}
       initialTab={params.tab}
+      initialMemberId={initialMemberId}
       highlightId={params.id}
     />
   );

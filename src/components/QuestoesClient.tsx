@@ -10,6 +10,7 @@ import {
   MessageSquareText,
   Pencil,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
   Trash2,
@@ -27,7 +28,10 @@ import {
   PlatformBadge,
   TopicBadge,
 } from "@/components/Badges";
+import { CodeforcesSyncModal } from "@/components/CodeforcesSyncModal";
+import { PeriodFilterButton } from "@/components/PeriodFilterButton";
 import { ProblemFormModal } from "@/components/ProblemFormModal";
+import { isDateInPeriod, type PeriodFilterValue } from "@/lib/period";
 import { DIFFICULTY_META, PLATFORM_META } from "@/lib/platform";
 import { cn, formatRelativeDate } from "@/lib/utils";
 import type { MemberSummary, ProblemLogItem, TopicItem } from "@/types";
@@ -75,8 +79,12 @@ export function QuestoesClient({
   const [platform, setPlatform] = useState<"ALL" | Platform>("ALL");
   const [difficulty, setDifficulty] = useState<"ALL" | Difficulty>("ALL");
   const [status, setStatus] = useState<StatusFilter>("ALL");
+  const [periodFilter, setPeriodFilter] = useState<PeriodFilterValue>({
+    preset: "all",
+  });
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [editingProblem, setEditingProblem] = useState<ProblemLogItem | null>(
     null
   );
@@ -91,7 +99,8 @@ export function QuestoesClient({
     topicId !== "ALL" ||
     platform !== "ALL" ||
     difficulty !== "ALL" ||
-    status !== "ALL";
+    status !== "ALL" ||
+    periodFilter.preset !== "all";
 
   const filteredProblems = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -117,6 +126,11 @@ export function QuestoesClient({
       }
       if (status === "SOLVED" && !problem.solved) return false;
       if (status === "REVIEW" && !problem.needsReview) return false;
+      if (
+        !isDateInPeriod(problem.reviewedAt ?? problem.createdAt, periodFilter)
+      ) {
+        return false;
+      }
 
       return true;
     });
@@ -128,6 +142,7 @@ export function QuestoesClient({
     platform,
     difficulty,
     status,
+    periodFilter,
   ]);
 
   function clearFilters() {
@@ -137,6 +152,7 @@ export function QuestoesClient({
     setPlatform("ALL");
     setDifficulty("ALL");
     setStatus("ALL");
+    setPeriodFilter({ preset: "all" });
   }
 
   function openCreateModal() {
@@ -203,14 +219,25 @@ export function QuestoesClient({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={openCreateModal}
-          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-        >
-          <Plus className="h-4 w-4" aria-hidden="true" />
-          <span>+ Registrar Questão</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => setSyncModalOpen(true)}
+            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-sky-500/40 bg-sky-500/15 px-3.5 py-2.5 text-sm font-medium text-sky-200 transition hover:bg-sky-500/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />
+            <span>Sincronizar Codeforces</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={openCreateModal}
+            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            <span>+ Registrar Questão</span>
+          </button>
+        </div>
       </div>
 
       {/* Filter Bar */}
@@ -246,7 +273,7 @@ export function QuestoesClient({
           ) : null}
         </div>
 
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-6">
           <div>
             <label htmlFor="filter-member" className="sr-only">
               Filtrar por membro
@@ -342,6 +369,13 @@ export function QuestoesClient({
               <option value="REVIEW">Em Revisão</option>
             </select>
           </div>
+
+          <PeriodFilterButton
+            value={periodFilter}
+            onChange={setPeriodFilter}
+            variant="filter"
+            align="right"
+          />
         </div>
       </section>
 
@@ -452,6 +486,11 @@ export function QuestoesClient({
 
                     <div className="flex flex-wrap items-center gap-1.5">
                       <PlatformBadge platform={problem.platform} />
+                      {problem.externalRating ? (
+                        <span className="inline-flex items-center rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-medium text-sky-300">
+                          CF {problem.externalRating}
+                        </span>
+                      ) : null}
                       <DifficultyBadge difficulty={problem.perceivedDifficulty} />
 
                       {problem.solved ? (
@@ -502,16 +541,15 @@ export function QuestoesClient({
                         •
                       </span>
                       <span>{formatRelativeDate(problem.createdAt)}</span>
-                      {problem.attemptCount > 1 ? (
-                        <>
-                          <span className="text-zinc-600" aria-hidden="true">
-                            •
-                          </span>
-                          <span className="font-mono text-[11px] text-zinc-400">
-                            {problem.attemptCount} tentativas
-                          </span>
-                        </>
-                      ) : null}
+                      <span className="text-zinc-600" aria-hidden="true">
+                        •
+                      </span>
+                      <span className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-300">
+                        {problem.attemptCount}{" "}
+                        {problem.attemptCount === 1
+                          ? "tentativa"
+                          : "tentativas"}
+                      </span>
                     </div>
                   </div>
 
@@ -606,6 +644,14 @@ export function QuestoesClient({
         }}
         topics={topics}
         initialProblem={editingProblem}
+      />
+
+      <CodeforcesSyncModal
+        open={syncModalOpen}
+        onClose={() => setSyncModalOpen(false)}
+        currentUserId={currentUserId}
+        members={members}
+        topics={topics}
       />
     </div>
   );

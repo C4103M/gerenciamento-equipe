@@ -20,6 +20,11 @@ import {
 } from "@/components/Badges";
 import { DashboardClient } from "@/components/DashboardClient";
 import { requireTeamMember } from "@/lib/auth";
+import {
+  buildPrismaProblemPeriodWhere,
+  formatPeriodLabel,
+  parsePeriodSearchParams,
+} from "@/lib/period";
 import { prisma } from "@/lib/prisma";
 import { cn, formatRelativeDate } from "@/lib/utils";
 import type { MemberSummary, TopicItem } from "@/types";
@@ -51,8 +56,20 @@ function computeTopTopics(
     .slice(0, limit);
 }
 
-export default async function DashboardPage() {
-  const currentUser = await requireTeamMember();
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ periodo?: string; from?: string; to?: string }>;
+}) {
+  const [resolvedParams, currentUser] = await Promise.all([
+    searchParams,
+    requireTeamMember(),
+  ]);
+
+  const periodFilter = parsePeriodSearchParams(resolvedParams);
+  const periodWhere = buildPrismaProblemPeriodWhere(periodFilter);
+  const isPeriodFiltered = periodFilter.preset !== "all";
+  const periodLabel = formatPeriodLabel(periodFilter);
 
   const [usersRaw, latestLogs, allLogsAgg, topicsRaw, openProposalsCount] =
     await Promise.all([
@@ -67,7 +84,7 @@ export default async function DashboardPage() {
           lcHandle: true,
           avatarColor: true,
           problemLogs: {
-            where: { teamId: currentUser.teamId },
+            where: { teamId: currentUser.teamId, ...periodWhere },
             select: {
               id: true,
               solved: true,
@@ -86,7 +103,7 @@ export default async function DashboardPage() {
         },
       }),
       prisma.problemLog.findMany({
-        where: { teamId: currentUser.teamId },
+        where: { teamId: currentUser.teamId, ...periodWhere },
         orderBy: { createdAt: "desc" },
         take: 8,
         include: {
@@ -111,7 +128,7 @@ export default async function DashboardPage() {
         },
       }),
       prisma.problemLog.findMany({
-        where: { teamId: currentUser.teamId },
+        where: { teamId: currentUser.teamId, ...periodWhere },
         select: {
           solved: true,
           needsReview: true,
@@ -125,7 +142,7 @@ export default async function DashboardPage() {
           slug: true,
           color: true,
           problemLogs: {
-            where: { teamId: currentUser.teamId },
+            where: { teamId: currentUser.teamId, ...periodWhere },
             select: {
               solved: true,
             },
@@ -236,13 +253,30 @@ export default async function DashboardPage() {
               {currentUser.team.name} — Painel da Equipe
             </h1>
           </div>
-          <p className="text-sm text-zinc-400">
-            Visão geral de resoluções, revisões ativas, cobertura de tópicos e
-            propostas do time.
-          </p>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-400">
+            <p>
+              Visão geral de resoluções, revisões ativas, cobertura de tópicos e
+              propostas do time.
+            </p>
+            {isPeriodFiltered ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-0.5 text-xs font-medium text-indigo-200">
+                <span>Período: {periodLabel}</span>
+                <Link
+                  href="/"
+                  className="text-indigo-300 underline hover:text-white"
+                >
+                  Ver global
+                </Link>
+              </span>
+            ) : null}
+          </div>
         </div>
 
-        <DashboardClient topics={serializedTopics} teammates={teammates} />
+        <DashboardClient
+          topics={serializedTopics}
+          teammates={teammates}
+          periodFilter={periodFilter}
+        />
       </header>
 
       {/* 4 Summary KPI Cards */}
@@ -608,6 +642,11 @@ export default async function DashboardPage() {
 
                       <div className="flex flex-wrap items-center gap-1.5">
                         <PlatformBadge platform={log.platform} />
+                        {log.externalRating ? (
+                          <span className="inline-flex items-center rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-medium text-sky-300">
+                            CF {log.externalRating}
+                          </span>
+                        ) : null}
                         <DifficultyBadge difficulty={log.perceivedDifficulty} />
                         {log.solved ? (
                           <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300">
@@ -641,6 +680,13 @@ export default async function DashboardPage() {
                       <MemberAvatar member={log.user} size="sm" />
                       <span className="font-medium text-zinc-300">
                         {log.user.name}
+                      </span>
+                      <span className="text-zinc-600" aria-hidden="true">
+                        •
+                      </span>
+                      <span className="font-mono text-[11px] text-zinc-400">
+                        {log.attemptCount}{" "}
+                        {log.attemptCount === 1 ? "tentativa" : "tentativas"}
                       </span>
                     </div>
                     <time

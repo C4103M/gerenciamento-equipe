@@ -6,16 +6,21 @@ import {
   CheckCircle2,
   Link2,
   Loader2,
+  Minus,
+  Plus,
+  Sparkles,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { lookupCodeforcesProblemAction } from "@/actions/codeforces";
 import {
   createProblemLogAction,
   updateProblemLogAction,
 } from "@/actions/problems";
 import { PlatformBadge } from "@/components/Badges";
 import { TopicSelector } from "@/components/TopicSelector";
+import { parseCodeforcesRef } from "@/lib/codeforces";
 import { DIFFICULTY_META, detectPlatform } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import type { ProblemLogItem, TopicItem } from "@/types";
@@ -63,19 +68,40 @@ function ProblemFormContent({
 
   const [title, setTitle] = useState(initialProblem?.title ?? "");
   const [url, setUrl] = useState(initialProblem?.url ?? "");
+  const [externalId, setExternalId] = useState<string | null>(
+    initialProblem?.externalId ?? null
+  );
+  const [externalRating, setExternalRating] = useState<number | null>(
+    initialProblem?.externalRating ?? null
+  );
   const [topicIds, setTopicIds] = useState<string[]>(
     initialProblem?.topics.map((t) => t.id) ?? []
   );
   const [perceivedDifficulty, setPerceivedDifficulty] = useState<Difficulty>(
     initialProblem?.perceivedDifficulty ?? "MEDIO"
   );
+  const [attemptCount, setAttemptCount] = useState<number>(
+    initialProblem?.attemptCount ?? 1
+  );
   const [solved, setSolved] = useState<boolean>(initialProblem?.solved ?? true);
   const [needsReview, setNeedsReview] = useState<boolean>(
     initialProblem?.needsReview ?? false
   );
   const [notes, setNotes] = useState(initialProblem?.notes ?? "");
+  const [isLookingUpCf, setIsLookingUpCf] = useState(false);
+  const [cfLookupStatus, setCfLookupStatus] = useState<{
+    type: "success" | "error";
+    text: string;
+    tags?: string[];
+  } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const lastAutoLookedUpRef = useRef<string | null>(
+    initialProblem ? (parseCodeforcesRef(initialProblem.url)?.externalId ?? null) : null
+  );
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lookupSeqRef = useRef(0);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -84,11 +110,121 @@ function ProblemFormContent({
       }
     }
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
   }, [isSubmitting, onClose]);
 
   const trimmedUrl = url.trim();
-  const detectedPlatform = trimmedUrl ? detectPlatform(trimmedUrl) : null;
+  const cfRef = trimmedUrl ? parseCodeforcesRef(trimmedUrl) : null;
+  const detectedPlatform = cfRef
+    ? "CODEFORCES"
+    : trimmedUrl
+      ? detectPlatform(trimmedUrl)
+      : null;
+
+  async function performCfLookup(rawInput: string, force: boolean) {
+    const parsed = parseCodeforcesRef(rawInput);
+    if (!parsed) return;
+
+    if (!force && lastAutoLookedUpRef.current === parsed.externalId) {
+      return;
+    }
+
+    lastAutoLookedUpRef.current = parsed.externalId;
+    const seq = ++lookupSeqRef.current;
+    setIsLookingUpCf(true);
+    setCfLookupStatus(null);
+
+    try {
+      const result = await lookupCodeforcesProblemAction(rawInput);
+      if (lookupSeqRef.current !== seq) return;
+
+      if (result.error || !result.data) {
+        setCfLookupStatus({
+          type: "error",
+          text:
+            result.error ?? "Não foi possível carregar dados do Codeforces.",
+        });
+        return;
+      }
+
+      const data = result.data;
+      setTitle(data.title);
+      setUrl(data.canonicalUrl);
+      setExternalId(data.externalId);
+      setExternalRating(data.rating);
+      if (data.matchedTopicIds.length > 0) {
+        setTopicIds(data.matchedTopicIds);
+      }
+      if (data.suggestedDifficulty) {
+        setPerceivedDifficulty(data.suggestedDifficulty);
+      }
+
+      const ratingPart = data.rating
+        ? `Rating ${data.rating}`
+        : "Sem rating oficial";
+      setCfLookupStatus({
+        type: "success",
+        text: `Autopreenchido via Codeforces · ${ratingPart}`,
+        tags: data.rawTags,
+      });
+    } catch {
+      if (lookupSeqRef.current !== seq) return;
+      setCfLookupStatus({
+        type: "error",
+        text: "Erro de comunicação ao consultar o Codeforces.",
+      });
+    } finally {
+      if (lookupSeqRef.current === seq) {
+        setIsLookingUpCf(false);
+      }
+    }
+  }
+
+  function handleUrlChange(nextValue: string) {
+    setUrl(nextValue);
+    setCfLookupStatus(null);
+
+    const parsed = parseCodeforcesRef(nextValue);
+    if (!parsed) {
+      setExternalId(null);
+      setExternalRating(null);
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      return;
+    }
+
+    if (parsed.externalId !== externalId) {
+      setExternalId(parsed.externalId);
+      setExternalRating(null);
+    }
+
+    if (isEditing) return;
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      void performCfLookup(nextValue, false);
+    }, 450);
+  }
+
+  function handleUrlPaste(e: React.ClipboardEvent<HTMLInputElement>) {
+    if (isEditing) return;
+    const pasted = e.clipboardData.getData("text");
+    const parsed = parseCodeforcesRef(pasted);
+    if (parsed) {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      void performCfLookup(pasted, false);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -117,6 +253,9 @@ function ProblemFormContent({
         solved,
         needsReview: solved ? needsReview : true,
         notes,
+        attemptCount: Math.max(1, Math.floor(attemptCount || 1)),
+        externalId: cfRef?.externalId ?? externalId,
+        externalRating,
       };
 
       const result = initialProblem
@@ -192,6 +331,87 @@ function ProblemFormContent({
               </div>
             ) : null}
 
+            {/* URL or CF code + Instant Autofill */}
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label
+                  htmlFor="problem-url"
+                  className="block text-sm font-medium text-zinc-200"
+                >
+                  Link ou código da questão{" "}
+                  <span className="text-rose-400">*</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  {cfRef ? (
+                    <button
+                      type="button"
+                      onClick={() => void performCfLookup(trimmedUrl, true)}
+                      disabled={isLookingUpCf || isSubmitting}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-xs font-medium text-sky-200 transition-colors hover:bg-sky-500/25 disabled:opacity-50"
+                    >
+                      {isLookingUpCf ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5" />
+                      )}
+                      <span>
+                        {isLookingUpCf ? "Buscando CF..." : "Preencher do CF"}
+                      </span>
+                    </button>
+                  ) : null}
+                  {detectedPlatform ? (
+                    <PlatformBadge platform={detectedPlatform} />
+                  ) : null}
+                </div>
+              </div>
+              <div className="relative">
+                <Link2
+                  className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-zinc-500"
+                  aria-hidden="true"
+                />
+                <input
+                  id="problem-url"
+                  type="text"
+                  inputMode="url"
+                  value={url}
+                  onChange={(e) => handleUrlChange(e.target.value)}
+                  onPaste={handleUrlPaste}
+                  placeholder="Cole link do CF/LeetCode/CSES ou digite 1800E2..."
+                  required
+                  className="w-full rounded-lg border border-zinc-800 bg-zinc-950 py-2 pr-3.5 pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
+                />
+              </div>
+
+              {isLookingUpCf ? (
+                <p className="flex items-center gap-1.5 text-xs text-sky-300">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Consultando dados da questão no Codeforces...</span>
+                </p>
+              ) : cfLookupStatus ? (
+                <div
+                  className={cn(
+                    "rounded-lg border px-3 py-2 text-xs",
+                    cfLookupStatus.type === "success"
+                      ? "border-sky-500/30 bg-sky-500/10 text-sky-200"
+                      : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                  )}
+                >
+                  <p className="font-medium">{cfLookupStatus.text}</p>
+                  {cfLookupStatus.tags && cfLookupStatus.tags.length > 0 ? (
+                    <p className="mt-1 text-[11px] text-sky-300/80">
+                      Tags CF: {cfLookupStatus.tags.join(", ")}
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="text-[11px] text-zinc-500">
+                  Dica: cole qualquer link do Codeforces ou digite só o código
+                  (ex: <span className="font-mono text-zinc-400">1800E2</span>)
+                  para preencher título, tópicos e dificuldade.
+                </p>
+              )}
+            </div>
+
             {/* Title */}
             <div className="space-y-1.5">
               <label
@@ -205,41 +425,10 @@ function ProblemFormContent({
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="Ex: Codeforces 1800E2 - Unforgivable Curse"
+                placeholder="Ex: CF 1800E2 - Unforgivable Curse (hard version)"
                 required
                 className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
               />
-            </div>
-
-            {/* URL + Live Platform Badge */}
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <label
-                  htmlFor="problem-url"
-                  className="block text-sm font-medium text-zinc-200"
-                >
-                  Link da questão <span className="text-rose-400">*</span>
-                </label>
-                {detectedPlatform ? (
-                  <PlatformBadge platform={detectedPlatform} />
-                ) : null}
-              </div>
-              <div className="relative">
-                <Link2
-                  className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-zinc-500"
-                  aria-hidden="true"
-                />
-                <input
-                  id="problem-url"
-                  type="text"
-                  inputMode="url"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://codeforces.com/problemset/problem/..."
-                  required
-                  className="w-full rounded-lg border border-zinc-800 bg-zinc-950 py-2 pr-3.5 pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
-                />
-              </div>
             </div>
 
             {/* Topics */}
@@ -254,37 +443,93 @@ function ProblemFormContent({
               />
             </div>
 
-            {/* Perceived Difficulty */}
-            <div className="space-y-2">
-              <span className="block text-sm font-medium text-zinc-200">
-                Dificuldade percebida
-              </span>
-              <div
-                className="grid grid-cols-2 gap-2 sm:grid-cols-4"
-                role="radiogroup"
-                aria-label="Dificuldade percebida"
-              >
-                {DIFFICULTY_OPTIONS.map((diff) => {
-                  const meta = DIFFICULTY_META[diff];
-                  const active = perceivedDifficulty === diff;
-                  return (
-                    <button
-                      key={diff}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      onClick={() => setPerceivedDifficulty(diff)}
-                      className={cn(
-                        "rounded-lg border px-3 py-2 text-xs font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
-                        active
-                          ? cn(meta.className, "ring-1 ring-current/40")
-                          : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-                      )}
-                    >
-                      {meta.label}
-                    </button>
-                  );
-                })}
+            {/* Perceived Difficulty & Attempt Count */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-12">
+              <div className="space-y-2 sm:col-span-8">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="block text-sm font-medium text-zinc-200">
+                    Dificuldade percebida
+                  </span>
+                  {externalRating ? (
+                    <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 font-mono text-[11px] text-sky-300">
+                      CF {externalRating}
+                    </span>
+                  ) : null}
+                </div>
+                <div
+                  className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+                  role="radiogroup"
+                  aria-label="Dificuldade percebida"
+                >
+                  {DIFFICULTY_OPTIONS.map((diff) => {
+                    const meta = DIFFICULTY_META[diff];
+                    const active = perceivedDifficulty === diff;
+                    return (
+                      <button
+                        key={diff}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        onClick={() => setPerceivedDifficulty(diff)}
+                        className={cn(
+                          "rounded-lg border px-2.5 py-2 text-xs font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
+                          active
+                            ? cn(meta.className, "ring-1 ring-current/40")
+                            : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                        )}
+                      >
+                        {meta.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-2 sm:col-span-4">
+                <label
+                  htmlFor="problem-attempt-count"
+                  className="block text-sm font-medium text-zinc-200"
+                >
+                  Número de tentativas
+                </label>
+                <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAttemptCount((prev) => Math.max(1, prev - 1))
+                    }
+                    disabled={attemptCount <= 1 || isSubmitting}
+                    aria-label="Diminuir número de tentativas"
+                    className="inline-flex h-7 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+                  >
+                    <Minus className="h-3.5 w-3.5" />
+                  </button>
+                  <input
+                    id="problem-attempt-count"
+                    type="number"
+                    min={1}
+                    max={999}
+                    value={attemptCount}
+                    onChange={(e) => {
+                      const val = Number.parseInt(e.target.value, 10);
+                      setAttemptCount(
+                        Number.isFinite(val) && val >= 1 ? val : 1
+                      );
+                    }}
+                    className="w-full bg-transparent text-center font-mono text-sm font-semibold text-zinc-100 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAttemptCount((prev) => Math.min(999, prev + 1))
+                    }
+                    disabled={isSubmitting}
+                    aria-label="Aumentar número de tentativas"
+                    className="inline-flex h-7 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
 

@@ -20,6 +20,7 @@ export interface MemberSummary {
   email: string;
   cfHandle: string | null;
   lcHandle: string | null;
+  cfLastSyncedAt?: string | null;
   avatarColor: string;
   role?: UserRole;
   teamId?: string | null;
@@ -38,6 +39,8 @@ export interface ProblemLogItem {
   title: string;
   url: string;
   platform: Platform;
+  externalId?: string | null;
+  externalRating?: number | null;
   perceivedDifficulty: Difficulty;
   solved: boolean;
   notes: string | null;

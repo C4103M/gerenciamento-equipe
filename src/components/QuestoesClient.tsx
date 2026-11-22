@@ -31,6 +31,7 @@ import {
   TopicBadge,
 } from "@/components/Badges";
 import { CodeforcesSyncModal } from "@/components/CodeforcesSyncModal";
+import { LeetCodeSyncModal } from "@/components/LeetCodeSyncModal";
 import { PeriodFilterButton } from "@/components/PeriodFilterButton";
 import { ProblemFormModal } from "@/components/ProblemFormModal";
 import type { PeriodFilterValue } from "@/lib/period";
@@ -133,6 +134,7 @@ export function QuestoesClient({
 
   const [modalOpen, setModalOpen] = useState(false);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
+  const [lcSyncModalOpen, setLcSyncModalOpen] = useState(false);
   const [editingProblem, setEditingProblem] = useState<ProblemLogItem | null>(
     null
   );
@@ -276,6 +278,15 @@ export function QuestoesClient({
           >
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
             <span>Sincronizar Codeforces</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setLcSyncModalOpen(true)}
+            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3.5 py-2.5 text-sm font-medium text-amber-200 transition hover:bg-amber-500/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+          >
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />
+            <span>Sincronizar LeetCode</span>
           </button>
 
           <button
@@ -777,6 +788,14 @@ export function QuestoesClient({
       <CodeforcesSyncModal
         open={syncModalOpen}
         onClose={() => setSyncModalOpen(false)}
+        currentUserId={currentUserId}
+        members={members}
+        topics={topics}
+      />
+
+      <LeetCodeSyncModal
+        open={lcSyncModalOpen}
+        onClose={() => setLcSyncModalOpen(false)}
         currentUserId={currentUserId}
         members={members}
         topics={topics}

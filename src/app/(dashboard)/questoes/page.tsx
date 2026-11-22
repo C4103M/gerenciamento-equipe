@@ -39,6 +39,7 @@ const MEMBER_SELECT = {
   cfHandle: true,
   lcHandle: true,
   cfLastSyncedAt: true,
+  lcLastSyncedAt: true,
   avatarColor: true,
 } as const;
 
@@ -207,6 +208,9 @@ export default async function QuestoesPage({
       ...log.user,
       cfLastSyncedAt: log.user.cfLastSyncedAt
         ? log.user.cfLastSyncedAt.toISOString()
+        : null,
+      lcLastSyncedAt: log.user.lcLastSyncedAt
+        ? log.user.lcLastSyncedAt.toISOString()
         : null,
     },
     topics: log.topics,

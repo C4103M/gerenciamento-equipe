@@ -14,6 +14,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { lookupCodeforcesProblemAction } from "@/actions/codeforces";
+import { lookupLeetCodeProblemAction } from "@/actions/leetcode";
 import {
   createProblemLogAction,
   updateProblemLogAction,
@@ -21,6 +22,7 @@ import {
 import { PlatformBadge } from "@/components/Badges";
 import { TopicSelector } from "@/components/TopicSelector";
 import { parseCodeforcesRef } from "@/lib/codeforces";
+import { parseLeetCodeRef } from "@/lib/leetcode";
 import { DIFFICULTY_META, detectPlatform } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import type { ProblemLogItem, TopicItem } from "@/types";
@@ -88,8 +90,12 @@ function ProblemFormContent({
     initialProblem?.needsReview ?? false
   );
   const [notes, setNotes] = useState(initialProblem?.notes ?? "");
-  const [isLookingUpCf, setIsLookingUpCf] = useState(false);
-  const [cfLookupStatus, setCfLookupStatus] = useState<{
+  const [isLookingUp, setIsLookingUp] = useState(false);
+  const [lookupPlatform, setLookupPlatform] = useState<
+    "CODEFORCES" | "LEETCODE" | null
+  >(null);
+  const [lookupStatus, setLookupStatus] = useState<{
+    platform: "CODEFORCES" | "LEETCODE";
     type: "success" | "error";
     text: string;
     tags?: string[];
@@ -98,7 +104,11 @@ function ProblemFormContent({
   const [error, setError] = useState<string | null>(null);
 
   const lastAutoLookedUpRef = useRef<string | null>(
-    initialProblem ? (parseCodeforcesRef(initialProblem.url)?.externalId ?? null) : null
+    initialProblem
+      ? (parseCodeforcesRef(initialProblem.url)?.externalId ??
+          parseLeetCodeRef(initialProblem.url)?.externalId ??
+          null)
+      : null
   );
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lookupSeqRef = useRef(0);
@@ -120,77 +130,136 @@ function ProblemFormContent({
 
   const trimmedUrl = url.trim();
   const cfRef = trimmedUrl ? parseCodeforcesRef(trimmedUrl) : null;
+  const lcRef = !cfRef && trimmedUrl ? parseLeetCodeRef(trimmedUrl) : null;
   const detectedPlatform = cfRef
     ? "CODEFORCES"
-    : trimmedUrl
-      ? detectPlatform(trimmedUrl)
-      : null;
+    : lcRef
+      ? "LEETCODE"
+      : trimmedUrl
+        ? detectPlatform(trimmedUrl)
+        : null;
 
-  async function performCfLookup(rawInput: string, force: boolean) {
-    const parsed = parseCodeforcesRef(rawInput);
-    if (!parsed) return;
+  async function performProblemLookup(rawInput: string, force: boolean) {
+    const parsedCf = parseCodeforcesRef(rawInput);
+    const parsedLc = !parsedCf ? parseLeetCodeRef(rawInput) : null;
+    if (!parsedCf && !parsedLc) return;
 
-    if (!force && lastAutoLookedUpRef.current === parsed.externalId) {
+    const targetExternalId = parsedCf
+      ? parsedCf.externalId
+      : parsedLc!.externalId;
+    const targetPlatform: "CODEFORCES" | "LEETCODE" = parsedCf
+      ? "CODEFORCES"
+      : "LEETCODE";
+
+    if (!force && lastAutoLookedUpRef.current === targetExternalId) {
       return;
     }
 
-    lastAutoLookedUpRef.current = parsed.externalId;
+    lastAutoLookedUpRef.current = targetExternalId;
     const seq = ++lookupSeqRef.current;
-    setIsLookingUpCf(true);
-    setCfLookupStatus(null);
+    setIsLookingUp(true);
+    setLookupPlatform(targetPlatform);
+    setLookupStatus(null);
 
     try {
-      const result = await lookupCodeforcesProblemAction(rawInput);
-      if (lookupSeqRef.current !== seq) return;
+      if (parsedCf) {
+        const result = await lookupCodeforcesProblemAction(rawInput);
+        if (lookupSeqRef.current !== seq) return;
 
-      if (result.error || !result.data) {
-        setCfLookupStatus({
-          type: "error",
-          text:
-            result.error ?? "Não foi possível carregar dados do Codeforces.",
+        if (result.error || !result.data) {
+          setLookupStatus({
+            platform: "CODEFORCES",
+            type: "error",
+            text:
+              result.error ?? "Não foi possível carregar dados do Codeforces.",
+          });
+          return;
+        }
+
+        const data = result.data;
+        setTitle(data.title);
+        setUrl(data.canonicalUrl);
+        setExternalId(data.externalId);
+        setExternalRating(data.rating);
+        if (data.matchedTopicIds.length > 0) {
+          setTopicIds(data.matchedTopicIds);
+        }
+        if (data.suggestedDifficulty) {
+          setPerceivedDifficulty(data.suggestedDifficulty);
+        }
+
+        const ratingPart = data.rating
+          ? `Rating ${data.rating}`
+          : "Sem rating oficial";
+        setLookupStatus({
+          platform: "CODEFORCES",
+          type: "success",
+          text: `Autopreenchido via Codeforces · ${ratingPart}`,
+          tags: data.rawTags,
         });
-        return;
-      }
+      } else {
+        const result = await lookupLeetCodeProblemAction(rawInput);
+        if (lookupSeqRef.current !== seq) return;
 
-      const data = result.data;
-      setTitle(data.title);
-      setUrl(data.canonicalUrl);
-      setExternalId(data.externalId);
-      setExternalRating(data.rating);
-      if (data.matchedTopicIds.length > 0) {
-        setTopicIds(data.matchedTopicIds);
-      }
-      if (data.suggestedDifficulty) {
-        setPerceivedDifficulty(data.suggestedDifficulty);
-      }
+        if (result.error || !result.data) {
+          setLookupStatus({
+            platform: "LEETCODE",
+            type: "error",
+            text:
+              result.error ?? "Não foi possível carregar dados do LeetCode.",
+          });
+          return;
+        }
 
-      const ratingPart = data.rating
-        ? `Rating ${data.rating}`
-        : "Sem rating oficial";
-      setCfLookupStatus({
-        type: "success",
-        text: `Autopreenchido via Codeforces · ${ratingPart}`,
-        tags: data.rawTags,
-      });
+        const data = result.data;
+        setTitle(data.title);
+        setUrl(data.canonicalUrl);
+        setExternalId(data.externalId);
+        setExternalRating(null);
+        if (data.matchedTopicIds.length > 0) {
+          setTopicIds(data.matchedTopicIds);
+        }
+        if (data.suggestedDifficulty) {
+          setPerceivedDifficulty(data.suggestedDifficulty);
+        }
+
+        const diffPart = data.lcDifficulty
+          ? `Dificuldade ${data.lcDifficulty}`
+          : "Sem dificuldade oficial";
+        setLookupStatus({
+          platform: "LEETCODE",
+          type: "success",
+          text: `Autopreenchido via LeetCode · ${diffPart}`,
+          tags: data.rawTags,
+        });
+      }
     } catch {
       if (lookupSeqRef.current !== seq) return;
-      setCfLookupStatus({
+      setLookupStatus({
+        platform: targetPlatform,
         type: "error",
-        text: "Erro de comunicação ao consultar o Codeforces.",
+        text:
+          targetPlatform === "CODEFORCES"
+            ? "Erro de comunicação ao consultar o Codeforces."
+            : "Erro de comunicação ao consultar o LeetCode.",
       });
     } finally {
       if (lookupSeqRef.current === seq) {
-        setIsLookingUpCf(false);
+        setIsLookingUp(false);
+        setLookupPlatform(null);
       }
     }
   }
 
   function handleUrlChange(nextValue: string) {
     setUrl(nextValue);
-    setCfLookupStatus(null);
+    setLookupStatus(null);
 
-    const parsed = parseCodeforcesRef(nextValue);
-    if (!parsed) {
+    const parsedCf = parseCodeforcesRef(nextValue);
+    const parsedLc = !parsedCf ? parseLeetCodeRef(nextValue) : null;
+    const parsedExtId = parsedCf?.externalId ?? parsedLc?.externalId ?? null;
+
+    if (!parsedExtId) {
       setExternalId(null);
       setExternalRating(null);
       if (debounceTimerRef.current) {
@@ -199,8 +268,8 @@ function ProblemFormContent({
       return;
     }
 
-    if (parsed.externalId !== externalId) {
-      setExternalId(parsed.externalId);
+    if (parsedExtId !== externalId) {
+      setExternalId(parsedExtId);
       setExternalRating(null);
     }
 
@@ -210,19 +279,18 @@ function ProblemFormContent({
       clearTimeout(debounceTimerRef.current);
     }
     debounceTimerRef.current = setTimeout(() => {
-      void performCfLookup(nextValue, false);
+      void performProblemLookup(nextValue, false);
     }, 450);
   }
 
   function handleUrlPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     if (isEditing) return;
     const pasted = e.clipboardData.getData("text");
-    const parsed = parseCodeforcesRef(pasted);
-    if (parsed) {
+    if (parseCodeforcesRef(pasted) || parseLeetCodeRef(pasted)) {
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
-      void performCfLookup(pasted, false);
+      void performProblemLookup(pasted, false);
     }
   }
 
@@ -254,7 +322,7 @@ function ProblemFormContent({
         needsReview: solved ? needsReview : true,
         notes,
         attemptCount: Math.max(1, Math.floor(attemptCount || 1)),
-        externalId: cfRef?.externalId ?? externalId,
+        externalId: cfRef?.externalId ?? lcRef?.externalId ?? externalId,
         externalRating,
       };
 
@@ -345,17 +413,33 @@ function ProblemFormContent({
                   {cfRef ? (
                     <button
                       type="button"
-                      onClick={() => void performCfLookup(trimmedUrl, true)}
-                      disabled={isLookingUpCf || isSubmitting}
+                      onClick={() => void performProblemLookup(trimmedUrl, true)}
+                      disabled={isLookingUp || isSubmitting}
                       className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/40 bg-sky-500/15 px-2.5 py-1 text-xs font-medium text-sky-200 transition-colors hover:bg-sky-500/25 disabled:opacity-50"
                     >
-                      {isLookingUpCf ? (
+                      {isLookingUp ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <Sparkles className="h-3.5 w-3.5" />
                       )}
                       <span>
-                        {isLookingUpCf ? "Buscando CF..." : "Preencher do CF"}
+                        {isLookingUp ? "Buscando CF..." : "Preencher do CF"}
+                      </span>
+                    </button>
+                  ) : lcRef ? (
+                    <button
+                      type="button"
+                      onClick={() => void performProblemLookup(trimmedUrl, true)}
+                      disabled={isLookingUp || isSubmitting}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/25 disabled:opacity-50"
+                    >
+                      {isLookingUp ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5" />
+                      )}
+                      <span>
+                        {isLookingUp ? "Buscando LC..." : "Preencher do LC"}
                       </span>
                     </button>
                   ) : null}
@@ -376,37 +460,61 @@ function ProblemFormContent({
                   value={url}
                   onChange={(e) => handleUrlChange(e.target.value)}
                   onPaste={handleUrlPaste}
-                  placeholder="Cole link do CF/LeetCode/CSES ou digite 1800E2..."
+                  placeholder="Cole link do CF/LeetCode/CSES ou digite 1800E2 / LC two-sum..."
                   required
                   className="w-full rounded-lg border border-zinc-800 bg-zinc-950 py-2 pr-3.5 pl-10 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
                 />
               </div>
 
-              {isLookingUpCf ? (
-                <p className="flex items-center gap-1.5 text-xs text-sky-300">
+              {isLookingUp ? (
+                <p
+                  className={cn(
+                    "flex items-center gap-1.5 text-xs",
+                    lookupPlatform === "LEETCODE"
+                      ? "text-amber-300"
+                      : "text-sky-300"
+                  )}
+                >
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>Consultando dados da questão no Codeforces...</span>
+                  <span>
+                    {lookupPlatform === "LEETCODE"
+                      ? "Consultando dados da questão no LeetCode..."
+                      : "Consultando dados da questão no Codeforces..."}
+                  </span>
                 </p>
-              ) : cfLookupStatus ? (
+              ) : lookupStatus ? (
                 <div
                   className={cn(
                     "rounded-lg border px-3 py-2 text-xs",
-                    cfLookupStatus.type === "success"
-                      ? "border-sky-500/30 bg-sky-500/10 text-sky-200"
-                      : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                    lookupStatus.type === "error"
+                      ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                      : lookupStatus.platform === "LEETCODE"
+                        ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                        : "border-sky-500/30 bg-sky-500/10 text-sky-200"
                   )}
                 >
-                  <p className="font-medium">{cfLookupStatus.text}</p>
-                  {cfLookupStatus.tags && cfLookupStatus.tags.length > 0 ? (
-                    <p className="mt-1 text-[11px] text-sky-300/80">
-                      Tags CF: {cfLookupStatus.tags.join(", ")}
+                  <p className="font-medium">{lookupStatus.text}</p>
+                  {lookupStatus.tags && lookupStatus.tags.length > 0 ? (
+                    <p
+                      className={cn(
+                        "mt-1 text-[11px]",
+                        lookupStatus.platform === "LEETCODE"
+                          ? "text-amber-300/80"
+                          : "text-sky-300/80"
+                      )}
+                    >
+                      {lookupStatus.platform === "LEETCODE"
+                        ? "Tags LC:"
+                        : "Tags CF:"}{" "}
+                      {lookupStatus.tags.join(", ")}
                     </p>
                   ) : null}
                 </div>
               ) : (
                 <p className="text-[11px] text-zinc-500">
-                  Dica: cole qualquer link do Codeforces ou digite só o código
-                  (ex: <span className="font-mono text-zinc-400">1800E2</span>)
+                  Dica: cole link do Codeforces/LeetCode ou use o código (ex:{" "}
+                  <span className="font-mono text-zinc-400">1800E2</span> ou{" "}
+                  <span className="font-mono text-zinc-400">LC two-sum</span>)
                   para preencher título, tópicos e dificuldade.
                 </p>
               )}

@@ -188,7 +188,7 @@ export async function lookupCodeforcesProblemAction(rawInput: string): Promise<{
   }
 
   const [cfResult, allTopics] = await Promise.all([
-    fetchCodeforcesProblem(ref.contestId, ref.index),
+    fetchCodeforcesProblem(ref.contestId, ref.index, { isGym: ref.isGym }),
     ensureCodeforcesFallbackTopics(),
   ]);
 

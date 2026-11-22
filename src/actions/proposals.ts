@@ -5,6 +5,7 @@ import { revalidatePath, updateTag } from "next/cache";
 import { requireTeamMember } from "@/lib/auth";
 import { CACHE_TAGS } from "@/lib/cache";
 import { parseCodeforcesRef } from "@/lib/codeforces";
+import { parseLeetCodeRef } from "@/lib/leetcode";
 import { NotificationService } from "@/lib/notifications";
 import { detectPlatform } from "@/lib/platform";
 import { prisma } from "@/lib/prisma";
@@ -31,8 +32,13 @@ export async function proposeProblemAction(
   const assigneeIds = Array.from(new Set(input.assigneeIds)).filter(Boolean);
   const title = input.title.trim();
   const cfRef = parseCodeforcesRef(input.url);
-  const url = cfRef ? cfRef.canonicalUrl : sanitizeHttpUrl(input.url);
-  const externalId = cfRef ? cfRef.externalId : null;
+  const lcRef = !cfRef ? parseLeetCodeRef(input.url) : null;
+  const url = cfRef
+    ? cfRef.canonicalUrl
+    : lcRef
+      ? lcRef.canonicalUrl
+      : sanitizeHttpUrl(input.url);
+  const externalId = cfRef?.externalId ?? lcRef?.externalId ?? null;
   const topicIds = Array.from(new Set(input.topicIds)).filter(Boolean);
   const message = input.message?.trim() || null;
 
@@ -246,6 +252,7 @@ export async function updateProposalStatusAction(
           externalId:
             proposal.externalId ??
             parseCodeforcesRef(proposal.url)?.externalId ??
+            parseLeetCodeRef(proposal.url)?.externalId ??
             null,
           perceivedDifficulty: difficulty,
           solved,

@@ -1,13 +1,52 @@
 "use server";
 
 import bcrypt from "bcryptjs";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { clearSession, createSession, requireUser } from "@/lib/auth";
+import { CACHE_TAGS } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 
 export interface AuthActionState {
   error?: string;
+}
+
+const MAX_ACTIVATION_ATTEMPTS = 5;
+const ACTIVATION_WINDOW_MS = 15 * 60 * 1000;
+
+const failedActivationAttempts = new Map<
+  string,
+  { count: number; resetAt: number }
+>();
+
+function isActivationRateLimited(key: string): boolean {
+  const entry = failedActivationAttempts.get(key);
+  if (!entry) return false;
+  if (entry.resetAt <= Date.now()) {
+    failedActivationAttempts.delete(key);
+    return false;
+  }
+  return entry.count >= MAX_ACTIVATION_ATTEMPTS;
+}
+
+function recordFailedActivationAttempt(key: string): number {
+  const now = Date.now();
+  const entry = failedActivationAttempts.get(key);
+  if (!entry || entry.resetAt <= now) {
+    failedActivationAttempts.set(key, {
+      count: 1,
+      resetAt: now + ACTIVATION_WINDOW_MS,
+    });
+    return 1;
+  }
+  entry.count += 1;
+  return entry.count;
+}
+
+function clearActivationAttempts(keys: string[]) {
+  for (const key of keys) {
+    failedActivationAttempts.delete(key);
+  }
 }
 
 export async function loginAction(
@@ -67,17 +106,27 @@ export async function activateAccountAction(
     .replace(/\s+/g, "");
   const password = String(formData.get("password") ?? "");
   const confirmPassword = String(formData.get("confirmPassword") ?? "");
-  const cfHandle = String(formData.get("cfHandle") ?? "").trim();
-  const lcHandle = String(formData.get("lcHandle") ?? "").trim();
+  const cfHandle = String(formData.get("cfHandle") ?? "").trim().slice(0, 60);
+  const lcHandle = String(formData.get("lcHandle") ?? "").trim().slice(0, 60);
 
   if (!/^\d{6}$/.test(code)) {
-    return { error: "Informe o código de verificação de 6 dígitos enviado ao seu e-mail." };
+    return {
+      error:
+        "Informe o código de verificação de 6 dígitos enviado ao seu e-mail.",
+    };
   }
-  if (!password || password.length < 6) {
-    return { error: "A senha deve ter pelo menos 6 caracteres." };
+  if (!password || password.length < 6 || password.length > 128) {
+    return { error: "A senha deve ter entre 6 e 128 caracteres." };
   }
   if (password !== confirmPassword) {
     return { error: "As senhas não coincidem." };
+  }
+
+  if (!token && emailInput && isActivationRateLimited(`email:${emailInput}`)) {
+    return {
+      error:
+        "Muitas tentativas incorretas. Aguarde 15 minutos ou utilize o link de ativação enviado ao seu e-mail.",
+    };
   }
 
   let record = null;
@@ -108,6 +157,9 @@ export async function activateAccountAction(
   }
 
   if (!record) {
+    if (!token && emailInput) {
+      recordFailedActivationAttempt(`email:${emailInput}`);
+    }
     return {
       error:
         "Link ou código de verificação inválido. Solicite um novo envio ao Administrador Global.",
@@ -117,7 +169,7 @@ export async function activateAccountAction(
   if (record.usedAt) {
     return {
       error:
-        "Este link de ativação já foi utilizado. Faça login com a sua senha.",
+        "Este link de ativação já foi utilizado ou invalidado. Solicite um novo envio ou faça login.",
     };
   }
 
@@ -129,10 +181,33 @@ export async function activateAccountAction(
   }
 
   if (record.code !== code) {
+    const tokenKey = `token:${record.id}`;
+    const attempts = recordFailedActivationAttempt(tokenKey);
+    if (!token && emailInput) {
+      recordFailedActivationAttempt(`email:${emailInput}`);
+    }
+
+    if (attempts >= MAX_ACTIVATION_ATTEMPTS) {
+      await prisma.verificationToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      });
+      clearActivationAttempts([tokenKey]);
+      return {
+        error:
+          "Muitas tentativas incorretas. Este código foi invalidado; solicite um novo envio ao Administrador Global.",
+      };
+    }
+
     return {
-      error: "Código de verificação incorreto. Confira os 6 dígitos no seu e-mail.",
+      error: `Código de verificação incorreto. Confira os 6 dígitos no seu e-mail (tentativa ${attempts} de ${MAX_ACTIVATION_ATTEMPTS}).`,
     };
   }
+
+  clearActivationAttempts([
+    `token:${record.id}`,
+    `email:${record.user.email}`,
+  ]);
 
   const passwordHash = await bcrypt.hash(password, 10);
   const now = new Date();
@@ -162,6 +237,9 @@ export async function activateAccountAction(
     teamId: updatedUser.teamId,
   });
 
+  if (updatedUser.teamId) {
+    updateTag(CACHE_TAGS.teamMembers(updatedUser.teamId));
+  }
   revalidatePath("/admin");
   revalidatePath("/membros");
 
@@ -207,11 +285,14 @@ export async function updateProfileAction(
   const lcHandle = String(formData.get("lcHandle") ?? "").trim() || null;
   const avatarColor = String(formData.get("avatarColor") ?? "#6366f1").trim();
 
-  if (!name || name.length < 2) {
-    return { error: "Nome deve ter pelo menos 2 caracteres." };
+  if (!name || name.length < 2 || name.length > 120) {
+    return { error: "Nome deve ter entre 2 e 120 caracteres." };
   }
-  if (!email || !email.includes("@")) {
+  if (!email || !email.includes("@") || email.length > 254) {
     return { error: "E-mail inválido." };
+  }
+  if ((cfHandle && cfHandle.length > 60) || (lcHandle && lcHandle.length > 60)) {
+    return { error: "Handle não pode exceder 60 caracteres." };
   }
 
   if (email !== currentUser.email) {
@@ -245,6 +326,11 @@ export async function updateProfileAction(
     teamId: updated.teamId,
   });
 
+  updateTag(CACHE_TAGS.userNav(updated.id));
+  if (updated.teamId) {
+    updateTag(CACHE_TAGS.teamMembers(updated.teamId));
+    updateTag(CACHE_TAGS.teamStats(updated.teamId));
+  }
   revalidatePath("/", "layout");
   revalidatePath("/membros");
   revalidatePath("/admin");
@@ -265,8 +351,8 @@ export async function changePasswordAction(
   if (!currentPassword || !newPassword || !confirmPassword) {
     return { error: "Preencha a senha atual, a nova senha e a confirmação." };
   }
-  if (newPassword.length < 6) {
-    return { error: "A nova senha deve ter pelo menos 6 caracteres." };
+  if (newPassword.length < 6 || newPassword.length > 128) {
+    return { error: "A nova senha deve ter entre 6 e 128 caracteres." };
   }
   if (newPassword !== confirmPassword) {
     return { error: "A confirmação da nova senha não coincide." };

@@ -1,7 +1,8 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { requireUser } from "@/lib/auth";
+import { CACHE_TAGS } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 
 export async function markNotificationReadAction(id: string): Promise<void> {
@@ -12,7 +13,7 @@ export async function markNotificationReadAction(id: string): Promise<void> {
     data: { read: true },
   });
 
-  revalidatePath("/", "layout");
+  updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/notificacoes");
 }
 
@@ -24,6 +25,6 @@ export async function markAllNotificationsReadAction(): Promise<void> {
     data: { read: true },
   });
 
-  revalidatePath("/", "layout");
+  updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/notificacoes");
 }

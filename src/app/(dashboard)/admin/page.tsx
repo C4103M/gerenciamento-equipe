@@ -6,12 +6,10 @@ import {
 import { requireGlobalAdmin } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
-export const dynamic = "force-dynamic";
-
 export default async function AdminPage() {
   const admin = await requireGlobalAdmin();
 
-  const [teamsRaw, usersRaw] = await Promise.all([
+  const [teamsRaw, usersRaw, logsAgg] = await Promise.all([
     prisma.team.findMany({
       orderBy: { createdAt: "asc" },
       include: {
@@ -28,13 +26,6 @@ export default async function AdminPage() {
             avatarColor: true,
             emailVerifiedAt: true,
             createdAt: true,
-          },
-        },
-        problemLogs: {
-          select: {
-            id: true,
-            solved: true,
-            needsReview: true,
           },
         },
         _count: {
@@ -64,12 +55,35 @@ export default async function AdminPage() {
         },
       },
     }),
+    prisma.problemLog.groupBy({
+      by: ["teamId", "solved", "needsReview"],
+      _count: { _all: true },
+    }),
   ]);
 
+  const statsByTeamId = new Map<
+    string,
+    { totalLogs: number; solvedLogs: number; reviewLogs: number }
+  >();
+  for (const row of logsAgg) {
+    const current = statsByTeamId.get(row.teamId) ?? {
+      totalLogs: 0,
+      solvedLogs: 0,
+      reviewLogs: 0,
+    };
+    const count = row._count._all;
+    current.totalLogs += count;
+    if (row.solved) current.solvedLogs += count;
+    if (row.needsReview) current.reviewLogs += count;
+    statsByTeamId.set(row.teamId, current);
+  }
+
   const teams: AdminTeamItem[] = teamsRaw.map((team) => {
-    const totalLogs = team.problemLogs.length;
-    const solvedLogs = team.problemLogs.filter((l) => l.solved).length;
-    const reviewLogs = team.problemLogs.filter((l) => l.needsReview).length;
+    const teamStats = statsByTeamId.get(team.id) ?? {
+      totalLogs: 0,
+      solvedLogs: 0,
+      reviewLogs: 0,
+    };
 
     return {
       id: team.id,
@@ -95,9 +109,9 @@ export default async function AdminPage() {
         createdAt: member.createdAt.toISOString(),
       })),
       stats: {
-        totalLogs,
-        solvedLogs,
-        reviewLogs,
+        totalLogs: teamStats.totalLogs,
+        solvedLogs: teamStats.solvedLogs,
+        reviewLogs: teamStats.reviewLogs,
         proposalsCount: team._count.proposedProblems,
       },
     };

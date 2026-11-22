@@ -135,6 +135,9 @@ model ProblemLog {
   @@index([needsReview])
   @@index([teamId, userId, externalId])
   @@index([teamId, createdAt])
+  @@index([teamId, reviewedAt])
+  @@index([teamId, needsReview, createdAt])
+  @@index([userId, teamId, needsReview])
 }
 
 model ProposedProblem {
@@ -182,4 +185,5 @@ model Notification {
   createdAt         DateTime         @default(now())
 
   @@index([userId, read])
+  @@index([userId, createdAt(sort: Desc)])
 }

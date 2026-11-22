@@ -16,72 +16,89 @@ import {
   MembersClient,
 } from "@/components/MembersClient";
 import { requireTeamMember } from "@/lib/auth";
+import { getCachedTopics } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 import { cn } from "@/lib/utils";
 import type { MemberSummary, TopicItem } from "@/types";
 
-export const dynamic = "force-dynamic";
-
-function computeTopTopics(
-  logs: Array<{ topics: TopicItem[] }>,
-  limit = 4
-): Array<TopicItem & { count: number }> {
-  const counts = new Map<string, TopicItem & { count: number }>();
-  for (const log of logs) {
-    for (const topic of log.topics) {
-      const existing = counts.get(topic.id);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        counts.set(topic.id, { ...topic, count: 1 });
-      }
-    }
-  }
-
-  return Array.from(counts.values())
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR"))
-    .slice(0, limit);
-}
-
 export default async function MembersPage() {
   const currentUser = await requireTeamMember();
 
-  const usersRaw = await prisma.user.findMany({
-    where: { teamId: currentUser.teamId },
-    orderBy: { createdAt: "asc" },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      cfHandle: true,
-      lcHandle: true,
-      avatarColor: true,
-      createdAt: true,
-      problemLogs: {
-        where: { teamId: currentUser.teamId },
-        select: {
-          id: true,
-          solved: true,
-          needsReview: true,
-          attemptCount: true,
-          topics: {
-            select: {
-              id: true,
-              name: true,
-              slug: true,
-              color: true,
-            },
+  const [usersRaw, topicsList, logsSummary] = await Promise.all([
+    prisma.user.findMany({
+      where: { teamId: currentUser.teamId },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        cfHandle: true,
+        lcHandle: true,
+        avatarColor: true,
+        createdAt: true,
+        _count: {
+          select: {
+            proposedToMe: { where: { teamId: currentUser.teamId } },
+            proposedByMe: { where: { teamId: currentUser.teamId } },
           },
         },
       },
-      _count: {
-        select: {
-          proposedToMe: { where: { teamId: currentUser.teamId } },
-          proposedByMe: { where: { teamId: currentUser.teamId } },
+    }),
+    getCachedTopics(),
+    prisma.problemLog.findMany({
+      where: { teamId: currentUser.teamId },
+      select: {
+        userId: true,
+        solved: true,
+        needsReview: true,
+        attemptCount: true,
+        topics: {
+          select: { id: true },
         },
       },
-    },
-  });
+    }),
+  ]);
+
+  const topicsById = new Map<string, TopicItem>(
+    topicsList.map((topic) => [topic.id, topic])
+  );
+
+  const memberStatsMap = new Map<
+    string,
+    {
+      totalLogs: number;
+      solvedCount: number;
+      reviewCount: number;
+      totalAttempts: number;
+      topicCounts: Map<string, number>;
+    }
+  >();
+
+  for (const log of logsSummary) {
+    let stats = memberStatsMap.get(log.userId);
+    if (!stats) {
+      stats = {
+        totalLogs: 0,
+        solvedCount: 0,
+        reviewCount: 0,
+        totalAttempts: 0,
+        topicCounts: new Map<string, number>(),
+      };
+      memberStatsMap.set(log.userId, stats);
+    }
+
+    stats.totalLogs += 1;
+    if (log.solved) stats.solvedCount += 1;
+    if (log.needsReview) stats.reviewCount += 1;
+    stats.totalAttempts += log.attemptCount;
+
+    for (const topicRef of log.topics) {
+      stats.topicCounts.set(
+        topicRef.id,
+        (stats.topicCounts.get(topicRef.id) ?? 0) + 1
+      );
+    }
+  }
 
   const currentUserSummary: MemberSummary = {
     id: currentUser.id,
@@ -93,15 +110,26 @@ export default async function MembersPage() {
   };
 
   const members: MemberDetailStats[] = usersRaw.map((u) => {
-    const totalLogs = u.problemLogs.length;
-    const solvedCount = u.problemLogs.filter((l) => l.solved).length;
-    const reviewCount = u.problemLogs.filter((l) => l.needsReview).length;
-    const totalAttempts = u.problemLogs.reduce(
-      (sum, l) => sum + l.attemptCount,
-      0
-    );
+    const stats = memberStatsMap.get(u.id);
+    const totalLogs = stats?.totalLogs ?? 0;
+    const solvedCount = stats?.solvedCount ?? 0;
+    const reviewCount = stats?.reviewCount ?? 0;
+    const totalAttempts = stats?.totalAttempts ?? 0;
     const accuracyRate =
       totalLogs > 0 ? Math.round((solvedCount / totalLogs) * 100) : 0;
+
+    const topTopics: Array<TopicItem & { count: number }> = [];
+    if (stats) {
+      for (const [topicId, count] of stats.topicCounts.entries()) {
+        const topic = topicsById.get(topicId);
+        if (topic) {
+          topTopics.push({ ...topic, count });
+        }
+      }
+      topTopics.sort(
+        (a, b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR")
+      );
+    }
 
     return {
       id: u.id,
@@ -118,7 +146,7 @@ export default async function MembersPage() {
       accuracyRate,
       proposedToMeCount: u._count.proposedToMe,
       proposedByMeCount: u._count.proposedByMe,
-      topTopics: computeTopTopics(u.problemLogs, 4),
+      topTopics: topTopics.slice(0, 4),
     };
   });
 

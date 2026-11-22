@@ -778,7 +778,9 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
       summary.proposalsUpdated += proposalsToCommit.length;
 
       const statusChangedProposals = proposalsToCommit.filter(
-        (proposal) => proposal.status !== targetStatus
+        (proposal) =>
+          proposal.status !== targetStatus &&
+          proposal.proposer.id !== targetMember.id
       );
       if (statusChangedProposals.length > 0) {
         await NotificationService.notifyProposalStatusUpdatedBatch(

@@ -28,9 +28,7 @@ export async function proposeProblemAction(
 ): Promise<{ error?: string; count?: number }> {
   const proposer = await requireTeamMember();
 
-  const assigneeIds = Array.from(new Set(input.assigneeIds)).filter(
-    (id) => id && id !== proposer.id
-  );
+  const assigneeIds = Array.from(new Set(input.assigneeIds)).filter(Boolean);
   const title = input.title.trim();
   const cfRef = parseCodeforcesRef(input.url);
   const url = cfRef ? cfRef.canonicalUrl : sanitizeHttpUrl(input.url);
@@ -98,8 +96,9 @@ export async function proposeProblemAction(
   );
 
   const assigneeById = new Map(assignees.map((a) => [a.id, a]));
-  await NotificationService.notifyProblemProposedBatch(
-    createdProposals.map((proposal) => {
+  const notificationsToSend = createdProposals
+    .filter((proposal) => proposal.assigneeId !== proposer.id)
+    .map((proposal) => {
       const assignee = assigneeById.get(proposal.assigneeId)!;
       return {
         assigneeId: assignee.id,
@@ -108,8 +107,11 @@ export async function proposeProblemAction(
         problemTitle: title,
         proposedProblemId: proposal.id,
       };
-    })
-  );
+    });
+
+  if (notificationsToSend.length > 0) {
+    await NotificationService.notifyProblemProposedBatch(notificationsToSend);
+  }
 
   updateTag(CACHE_TAGS.teamStats(proposer.teamId));
   for (const assignee of assignees) {
@@ -140,7 +142,7 @@ export async function markProposalViewedAction(
   if (proposal.assigneeId !== user.id) {
     return { error: "Apenas o destinatário pode marcar como visualizado." };
   }
-  if (proposal.status !== "PENDENTE") {
+  if (proposal.proposerId === user.id || proposal.status !== "PENDENTE") {
     return {};
   }
 
@@ -250,7 +252,10 @@ export async function updateProposalStatusAction(
           needsReview,
           attemptCount: parsedAttemptCount ?? 1,
           notes:
-            trimmedNotes || `Questão proposta por ${proposal.proposer.name}.`,
+            trimmedNotes ||
+            (proposal.proposerId === user.id
+              ? "Questão salva para fazer depois."
+              : `Questão proposta por ${proposal.proposer.name}.`),
           topics: {
             connect: topicIds,
           },
@@ -270,7 +275,7 @@ export async function updateProposalStatusAction(
     },
   });
 
-  if (proposal.status !== nextStatus) {
+  if (proposal.status !== nextStatus && proposal.proposer.id !== user.id) {
     await NotificationService.notifyProposalStatusUpdated({
       proposerId: proposal.proposer.id,
       proposerEmail: proposal.proposer.email,

@@ -168,6 +168,15 @@ export default async function DashboardPage({
     (u) => u.id !== currentUser.id
   );
 
+  const currentUserSummary: MemberSummary = {
+    id: currentUser.id,
+    name: currentUser.name,
+    email: currentUser.email,
+    cfHandle: currentUser.cfHandle,
+    lcHandle: currentUser.lcHandle,
+    avatarColor: currentUser.avatarColor,
+  };
+
   const memberCards = teamMembers.map((u) => {
     const stats = memberStatsMap.get(u.id);
     const totalLogs = stats?.totalLogs ?? 0;
@@ -267,6 +276,7 @@ export default async function DashboardPage({
         </div>
 
         <DashboardClient
+          currentUser={currentUserSummary}
           topics={serializedTopics}
           teammates={teammates}
           periodFilter={periodFilter}

@@ -67,10 +67,20 @@ export default async function PropostosPage({
     .filter((m) => m.id !== currentUser.id)
     .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
 
+  const currentUserSummary: MemberSummary = {
+    id: currentUser.id,
+    name: currentUser.name,
+    email: currentUser.email,
+    cfHandle: currentUser.cfHandle,
+    lcHandle: currentUser.lcHandle,
+    avatarColor: currentUser.avatarColor,
+  };
+
   return (
     <PropostosClient
       key={`${params.tab ?? "recebidos"}-${params.id ?? ""}`}
       currentUserId={currentUser.id}
+      currentUser={currentUserSummary}
       proposals={proposals}
       teammates={teammates}
       topics={topics}

@@ -279,22 +279,28 @@ export async function resolveReviewProblemAction(
       data: { status: "FEITO" },
     });
 
-    await NotificationService.notifyProposalStatusUpdatedBatch(
-      proposalsToComplete.map((proposal) => ({
-        proposerId: proposal.proposer.id,
-        proposerEmail: proposal.proposer.email,
-        assigneeName: user.name,
-        problemTitle: proposal.title,
-        status: "FEITO" as const,
-        proposedProblemId: proposal.id,
-      }))
+    const proposalsToNotify = proposalsToComplete.filter(
+      (proposal) => proposal.proposer.id !== user.id
     );
 
-    const notifiedProposers = new Set(
-      proposalsToComplete.map((p) => p.proposer.id)
-    );
-    for (const proposerId of notifiedProposers) {
-      updateTag(CACHE_TAGS.userNav(proposerId));
+    if (proposalsToNotify.length > 0) {
+      await NotificationService.notifyProposalStatusUpdatedBatch(
+        proposalsToNotify.map((proposal) => ({
+          proposerId: proposal.proposer.id,
+          proposerEmail: proposal.proposer.email,
+          assigneeName: user.name,
+          problemTitle: proposal.title,
+          status: "FEITO" as const,
+          proposedProblemId: proposal.id,
+        }))
+      );
+
+      const notifiedProposers = new Set(
+        proposalsToNotify.map((p) => p.proposer.id)
+      );
+      for (const proposerId of notifiedProposers) {
+        updateTag(CACHE_TAGS.userNav(proposerId));
+      }
     }
   }
 

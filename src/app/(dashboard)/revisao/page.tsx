@@ -84,7 +84,8 @@ export default async function RevisaoPage({
       orderBy: { name: "asc" as const },
     },
     fromProposals: {
-      include: {
+      select: {
+        proposerId: true,
         proposer: {
           select: { name: true },
         },
@@ -132,24 +133,29 @@ export default async function RevisaoPage({
         })
       : initialLogsRaw;
 
-  const problems: ReviewProblemItem[] = reviewLogsRaw.map((log) => ({
-    id: log.id,
-    userId: log.userId,
-    title: log.title,
-    url: log.url,
-    platform: log.platform,
-    perceivedDifficulty: log.perceivedDifficulty,
-    solved: log.solved,
-    notes: log.notes,
-    needsReview: log.needsReview,
-    reviewedAt: log.reviewedAt ? log.reviewedAt.toISOString() : null,
-    attemptCount: log.attemptCount,
-    createdAt: log.createdAt.toISOString(),
-    updatedAt: log.updatedAt.toISOString(),
-    user: log.user,
-    topics: log.topics,
-    fromProposalProposerName: log.fromProposals[0]?.proposer.name ?? null,
-  }));
+  const problems: ReviewProblemItem[] = reviewLogsRaw.map((log) => {
+    const externalProposal = log.fromProposals.find(
+      (p) => p.proposerId !== log.userId
+    );
+    return {
+      id: log.id,
+      userId: log.userId,
+      title: log.title,
+      url: log.url,
+      platform: log.platform,
+      perceivedDifficulty: log.perceivedDifficulty,
+      solved: log.solved,
+      notes: log.notes,
+      needsReview: log.needsReview,
+      reviewedAt: log.reviewedAt ? log.reviewedAt.toISOString() : null,
+      attemptCount: log.attemptCount,
+      createdAt: log.createdAt.toISOString(),
+      updatedAt: log.updatedAt.toISOString(),
+      user: log.user,
+      topics: log.topics,
+      fromProposalProposerName: externalProposal?.proposer.name ?? null,
+    };
+  });
 
   return (
     <RevisaoClient

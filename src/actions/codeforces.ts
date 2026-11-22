@@ -1,8 +1,9 @@
 "use server";
 
 import type { Difficulty, ProposalStatus } from "@prisma/client";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { requireTeamMember } from "@/lib/auth";
+import { CACHE_TAGS, getCachedTopics } from "@/lib/cache";
 import {
   aggregateCodeforcesSubmissions,
   fetchCodeforcesProblem,
@@ -14,7 +15,12 @@ import {
 } from "@/lib/codeforces";
 import { NotificationService } from "@/lib/notifications";
 import { prisma } from "@/lib/prisma";
+import { sanitizeHttpUrl } from "@/lib/url";
 import type { TopicItem } from "@/types";
+
+const MAX_BATCH_ITEMS = 500;
+const MAX_TITLE_LENGTH = 300;
+const MAX_NOTES_LENGTH = 10000;
 
 export type SyncItemAction =
   | "NEW_SOLVED"
@@ -119,10 +125,7 @@ const FALLBACK_TOPICS_TO_ENSURE = [
 ] as const;
 
 async function ensureCodeforcesFallbackTopics(): Promise<TopicItem[]> {
-  const existing = await prisma.topic.findMany({
-    select: { id: true, name: true, slug: true, color: true },
-    orderBy: { name: "asc" },
-  });
+  const existing = await getCachedTopics();
 
   const existingSlugs = new Set(existing.map((t) => t.slug));
   const missing = FALLBACK_TOPICS_TO_ENSURE.filter(
@@ -133,18 +136,17 @@ async function ensureCodeforcesFallbackTopics(): Promise<TopicItem[]> {
     return existing;
   }
 
-  for (const topic of missing) {
-    await prisma.topic.upsert({
-      where: { slug: topic.slug },
-      update: {},
-      create: {
-        name: topic.name,
-        slug: topic.slug,
-        color: topic.color,
-        isDefault: topic.isDefault,
-      },
-    });
-  }
+  await prisma.topic.createMany({
+    data: missing.map((topic) => ({
+      name: topic.name,
+      slug: topic.slug,
+      color: topic.color,
+      isDefault: topic.isDefault,
+    })),
+    skipDuplicates: true,
+  });
+
+  updateTag(CACHE_TAGS.topics);
 
   return prisma.topic.findMany({
     select: { id: true, name: true, slug: true, color: true },
@@ -583,6 +585,47 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
 }> {
   const currentUser = await requireTeamMember();
 
+  if (params.items.length > MAX_BATCH_ITEMS) {
+    return {
+      error: `A sincronização em lote suporta no máximo ${MAX_BATCH_ITEMS} itens por vez.`,
+    };
+  }
+
+  const sanitizedItems: Array<
+    SyncCommitItem & {
+      safeUrl: string;
+      cleanTitle: string;
+      cleanNotes: string | null;
+    }
+  > = [];
+
+  for (const item of params.items) {
+    const cleanTitle = item.title.trim();
+    if (cleanTitle.length < 2 || cleanTitle.length > MAX_TITLE_LENGTH) {
+      return {
+        error: `Título inválido na sincronização (deve ter entre 2 e ${MAX_TITLE_LENGTH} caracteres).`,
+      };
+    }
+    const safeUrl = sanitizeHttpUrl(item.canonicalUrl);
+    if (!safeUrl) {
+      return {
+        error: `URL inválida detectada no item "${cleanTitle}".`,
+      };
+    }
+    const cleanNotes = item.notes?.trim() || null;
+    if (cleanNotes && cleanNotes.length > MAX_NOTES_LENGTH) {
+      return {
+        error: `Observação do item "${cleanTitle}" excede o limite de ${MAX_NOTES_LENGTH} caracteres.`,
+      };
+    }
+    sanitizedItems.push({
+      ...item,
+      safeUrl,
+      cleanTitle,
+      cleanNotes,
+    });
+  }
+
   const targetMember = await prisma.user.findUnique({
     where: { id: params.memberId },
     select: {
@@ -605,7 +648,9 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
     skippedDuplicates: 0,
   };
 
-  if (params.items.length > 0) {
+  const notifiedUserIds = new Set<string>();
+
+  if (sanitizedItems.length > 0) {
     const [allTopics, existingLogsForMember, openProposals] = await Promise.all([
       ensureCodeforcesFallbackTopics(),
       prisma.problemLog.findMany({
@@ -701,42 +746,62 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
         }
       }
 
+      const proposalsToCommit: Array<(typeof openProposals)[number]> = [];
       for (const proposal of allToUpdate) {
         if (updatedProposalIds.has(proposal.id)) continue;
-        if (proposal.status === targetStatus && proposal.resultingLogId === resultingLogId) {
+        if (
+          proposal.status === targetStatus &&
+          proposal.resultingLogId === resultingLogId
+        ) {
           continue;
         }
-
         updatedProposalIds.add(proposal.id);
-        const statusChanged = proposal.status !== targetStatus;
+        proposalsToCommit.push(proposal);
+      }
 
-        await prisma.proposedProblem.update({
-          where: { id: proposal.id },
-          data: {
-            status: targetStatus,
-            resultingLogId,
-            viewedAt: proposal.viewedAt ?? new Date(),
-          },
-        });
+      if (proposalsToCommit.length === 0) return;
 
-        summary.proposalsUpdated += 1;
+      const now = new Date();
+      await Promise.all(
+        proposalsToCommit.map((proposal) =>
+          prisma.proposedProblem.update({
+            where: { id: proposal.id },
+            data: {
+              status: targetStatus,
+              resultingLogId,
+              viewedAt: proposal.viewedAt ?? now,
+            },
+          })
+        )
+      );
 
-        if (statusChanged) {
-          await NotificationService.notifyProposalStatusUpdated({
+      summary.proposalsUpdated += proposalsToCommit.length;
+
+      const statusChangedProposals = proposalsToCommit.filter(
+        (proposal) =>
+          proposal.status !== targetStatus &&
+          proposal.proposer.id !== targetMember.id
+      );
+      if (statusChangedProposals.length > 0) {
+        await NotificationService.notifyProposalStatusUpdatedBatch(
+          statusChangedProposals.map((proposal) => ({
             proposerId: proposal.proposer.id,
             proposerEmail: proposal.proposer.email,
             assigneeName: targetMember.name,
             problemTitle: proposal.title,
             status: targetStatus,
             proposedProblemId: proposal.id,
-          });
+          }))
+        );
+        for (const proposal of statusChangedProposals) {
+          notifiedUserIds.add(proposal.proposer.id);
         }
       }
     };
 
     const CHUNK_SIZE = 8;
-    for (let i = 0; i < params.items.length; i += CHUNK_SIZE) {
-      const chunk = params.items.slice(i, i + CHUNK_SIZE);
+    for (let i = 0; i < sanitizedItems.length; i += CHUNK_SIZE) {
+      const chunk = sanitizedItems.slice(i, i + CHUNK_SIZE);
 
       await Promise.all(
         chunk.map(async (item) => {
@@ -756,7 +821,7 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
           const safeActivityDate = Number.isNaN(activityDate.getTime())
             ? new Date()
             : activityDate;
-          const trimmedNotes = item.notes?.trim() || null;
+          const trimmedNotes = item.cleanNotes;
 
           if (
             item.action === "NEW_SOLVED" ||
@@ -778,8 +843,8 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
               data: {
                 teamId: currentUser.teamId,
                 userId: targetMember.id,
-                title: item.title.trim(),
-                url: item.canonicalUrl,
+                title: item.cleanTitle,
+                url: item.safeUrl,
                 platform: "CODEFORCES",
                 externalId: item.externalId,
                 externalRating: rating,
@@ -798,7 +863,7 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
 
             existingByExternalId.set(item.externalId, {
               id: created.id,
-              url: item.canonicalUrl,
+              url: item.safeUrl,
               externalId: item.externalId,
               externalRating: rating,
               attemptCount,
@@ -937,6 +1002,15 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
       where: { id: targetMember.id },
       data: { cfLastSyncedAt: new Date() },
     });
+  }
+
+  if (sanitizedItems.length > 0 || params.markSyncedNow) {
+    updateTag(CACHE_TAGS.teamStats(currentUser.teamId));
+    updateTag(CACHE_TAGS.teamMembers(currentUser.teamId));
+    updateTag(CACHE_TAGS.userNav(targetMember.id));
+    for (const userId of notifiedUserIds) {
+      updateTag(CACHE_TAGS.userNav(userId));
+    }
 
     revalidatePath("/");
     revalidatePath("/questoes");

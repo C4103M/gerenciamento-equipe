@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import {
   SESSION_COOKIE_NAME,
@@ -26,13 +27,13 @@ export async function clearSession(): Promise<void> {
   cookieStore.delete(SESSION_COOKIE_NAME);
 }
 
-export async function getSession(): Promise<SessionPayload | null> {
+export const getSession = cache(async (): Promise<SessionPayload | null> => {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
   return verifySessionToken(token);
-}
+});
 
-export async function getCurrentUser() {
+export const getCurrentUser = cache(async () => {
   const session = await getSession();
   if (!session) return null;
 
@@ -62,19 +63,20 @@ export async function getCurrentUser() {
   });
 
   return user;
-}
+});
 
 export async function requireUser() {
+  const user = await getCurrentUser();
+  if (user) {
+    return user;
+  }
+
   const session = await getSession();
   if (!session) {
     redirect("/login");
   }
 
-  const user = await getCurrentUser();
-  if (!user) {
-    redirect("/api/auth/clear-session");
-  }
-  return user;
+  redirect("/api/auth/clear-session");
 }
 
 export async function requireGlobalAdmin() {

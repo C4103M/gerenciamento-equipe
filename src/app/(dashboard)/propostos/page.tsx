@@ -1,7 +1,8 @@
 import { PropostosClient } from "@/components/PropostosClient";
 import { requireTeamMember } from "@/lib/auth";
+import { getCachedTeamMembers, getCachedTopics } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
-import type { MemberSummary, ProposedProblemItem, TopicItem } from "@/types";
+import type { MemberSummary, ProposedProblemItem } from "@/types";
 
 export default async function PropostosPage({
   searchParams,
@@ -29,7 +30,7 @@ export default async function PropostosPage({
     color: true,
   } as const;
 
-  const [proposalsRaw, teammatesRaw, topicsRaw] = await Promise.all([
+  const [proposalsRaw, teamMembers, topics] = await Promise.all([
     prisma.proposedProblem.findMany({
       where: { teamId: currentUser.teamId },
       include: {
@@ -39,15 +40,8 @@ export default async function PropostosPage({
       },
       orderBy: { createdAt: "desc" },
     }),
-    prisma.user.findMany({
-      where: { teamId: currentUser.teamId, id: { not: currentUser.id } },
-      select: memberSelect,
-      orderBy: { name: "asc" },
-    }),
-    prisma.topic.findMany({
-      select: topicSelect,
-      orderBy: { name: "asc" },
-    }),
+    getCachedTeamMembers(currentUser.teamId),
+    getCachedTopics(),
   ]);
 
   const proposals: ProposedProblemItem[] = proposalsRaw.map((p) => ({
@@ -69,13 +63,24 @@ export default async function PropostosPage({
     topics: p.topics,
   }));
 
-  const teammates: MemberSummary[] = teammatesRaw;
-  const topics: TopicItem[] = topicsRaw;
+  const teammates: MemberSummary[] = teamMembers
+    .filter((m) => m.id !== currentUser.id)
+    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+
+  const currentUserSummary: MemberSummary = {
+    id: currentUser.id,
+    name: currentUser.name,
+    email: currentUser.email,
+    cfHandle: currentUser.cfHandle,
+    lcHandle: currentUser.lcHandle,
+    avatarColor: currentUser.avatarColor,
+  };
 
   return (
     <PropostosClient
       key={`${params.tab ?? "recebidos"}-${params.id ?? ""}`}
       currentUserId={currentUser.id}
+      currentUser={currentUserSummary}
       proposals={proposals}
       teammates={teammates}
       topics={topics}

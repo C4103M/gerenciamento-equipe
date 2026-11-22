@@ -10,6 +10,7 @@ import { buildPeriodQueryString, type PeriodFilterValue } from "@/lib/period";
 import type { MemberSummary, TopicItem } from "@/types";
 
 export interface DashboardClientProps {
+  currentUser: MemberSummary;
   topics: TopicItem[];
   teammates: MemberSummary[];
   periodFilter: PeriodFilterValue;
@@ -17,6 +18,7 @@ export interface DashboardClientProps {
 
 /** Quick action buttons and modal controllers for the team dashboard header. */
 export function DashboardClient({
+  currentUser,
   topics,
   teammates,
   periodFilter,
@@ -69,6 +71,7 @@ export function DashboardClient({
       <ProposeProblemModal
         open={proposeModalOpen}
         onClose={() => setProposeModalOpen(false)}
+        currentUser={currentUser}
         teammates={teammates}
         topics={topics}
       />

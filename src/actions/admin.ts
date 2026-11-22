@@ -1,8 +1,9 @@
 "use server";
 
 import type { UserRole } from "@prisma/client";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { createSession, requireGlobalAdmin } from "@/lib/auth";
+import { CACHE_TAGS } from "@/lib/cache";
 import { type EmailDeliveryMode, issueVerificationForUser } from "@/lib/email";
 import { prisma } from "@/lib/prisma";
 import { slugify } from "@/lib/utils";
@@ -33,29 +34,42 @@ export async function createTeamAction(
     : 3;
   const description = input.description?.trim() || null;
 
-  if (name.length < 2) {
-    return { error: "O nome da equipe deve ter pelo menos 2 caracteres." };
+  if (name.length < 2 || name.length > 100) {
+    return {
+      error: "O nome da equipe deve ter entre 2 e 100 caracteres.",
+    };
   }
-  if (inviteCode.length < 3) {
+  if (inviteCode.length < 3 || inviteCode.length > 40) {
     return {
       error:
-        "O código de convite deve ter pelo menos 3 caracteres (letras/números).",
+        "O código de convite deve ter entre 3 e 40 caracteres (letras/números).",
     };
+  }
+  if (description && description.length > 500) {
+    return { error: "A descrição não pode exceder 500 caracteres." };
   }
 
   const baseSlug = slugify(name) || "equipe";
-  let slug = baseSlug;
-  let suffix = 2;
-  while (await prisma.team.findUnique({ where: { slug }, select: { id: true } })) {
-    slug = `${baseSlug}-${suffix++}`;
-  }
+  const [existingSlugs, existingCode] = await Promise.all([
+    prisma.team.findMany({
+      where: { slug: { startsWith: baseSlug } },
+      select: { slug: true },
+    }),
+    prisma.team.findUnique({
+      where: { inviteCode },
+      select: { id: true },
+    }),
+  ]);
 
-  const existingCode = await prisma.team.findUnique({
-    where: { inviteCode },
-    select: { id: true },
-  });
   if (existingCode) {
     return { error: "Já existe uma equipe utilizando este código de convite." };
+  }
+
+  const slugSet = new Set(existingSlugs.map((t) => t.slug));
+  let slug = baseSlug;
+  let suffix = 2;
+  while (slugSet.has(slug)) {
+    slug = `${baseSlug}-${suffix++}`;
   }
 
   const team = await prisma.team.create({
@@ -94,11 +108,18 @@ export async function updateTeamAction(
     : 3;
   const description = input.description?.trim() || null;
 
-  if (name.length < 2) {
-    return { error: "O nome da equipe deve ter pelo menos 2 caracteres." };
+  if (name.length < 2 || name.length > 100) {
+    return {
+      error: "O nome da equipe deve ter entre 2 e 100 caracteres.",
+    };
   }
-  if (inviteCode.length < 3) {
-    return { error: "O código de convite deve ter pelo menos 3 caracteres." };
+  if (inviteCode.length < 3 || inviteCode.length > 40) {
+    return {
+      error: "O código de convite deve ter entre 3 e 40 caracteres.",
+    };
+  }
+  if (description && description.length > 500) {
+    return { error: "A descrição não pode exceder 500 caracteres." };
   }
 
   const codeConflict = await prisma.team.findFirst({
@@ -119,6 +140,7 @@ export async function updateTeamAction(
     },
   });
 
+  updateTag(CACHE_TAGS.teamMembers(teamId));
   revalidatePath("/admin");
   revalidatePath("/", "layout");
   revalidatePath("/membros");
@@ -150,6 +172,9 @@ export async function deleteTeamAction(
     });
   }
 
+  updateTag(CACHE_TAGS.teamMembers(teamId));
+  updateTag(CACHE_TAGS.teamStats(teamId));
+  updateTag(CACHE_TAGS.userNav(admin.id));
   revalidatePath("/admin");
   revalidatePath("/", "layout");
   return {};
@@ -189,59 +214,76 @@ export async function createTeamMemberByAdminAction(input: {
       ? input.avatarColor
       : "#6366f1";
 
-  if (name.length < 2) {
-    return { error: "Nome deve ter pelo menos 2 caracteres." };
+  if (name.length < 2 || name.length > 120) {
+    return { error: "Nome deve ter entre 2 e 120 caracteres." };
   }
-  if (!email || !email.includes("@")) {
+  if (!email || !email.includes("@") || email.length > 254) {
     return { error: "Informe um e-mail válido." };
   }
+  if ((cfHandle && cfHandle.length > 60) || (lcHandle && lcHandle.length > 60)) {
+    return { error: "Handle não pode exceder 60 caracteres." };
+  }
 
-  let teamName: string | null = null;
-  if (teamId) {
-    const team = await prisma.team.findUnique({
-      where: { id: teamId },
-      include: { _count: { select: { members: true } } },
+  const txResult = await prisma.$transaction(async (tx) => {
+    let teamName: string | null = null;
+    if (teamId) {
+      const team = await tx.team.findUnique({
+        where: { id: teamId },
+        include: { _count: { select: { members: true } } },
+      });
+      if (!team) {
+        return { error: "Equipe não encontrada." as const };
+      }
+      if (team.maxMembers > 0 && team._count.members >= team.maxMembers) {
+        return {
+          error: `A equipe "${team.name}" já atingiu o limite de ${team.maxMembers} membros.`,
+        };
+      }
+      teamName = team.name;
+    }
+
+    const duplicate = await tx.user.findUnique({
+      where: { email },
+      select: { id: true },
     });
-    if (!team) {
-      return { error: "Equipe não encontrada." };
+    if (duplicate) {
+      return { error: "Já existe um usuário cadastrado com este e-mail." };
     }
-    if (team.maxMembers > 0 && team._count.members >= team.maxMembers) {
-      return {
-        error: `A equipe "${team.name}" já atingiu o limite de ${team.maxMembers} membros.`,
-      };
-    }
-    teamName = team.name;
-  }
 
-  const duplicate = await prisma.user.findUnique({
-    where: { email },
-    select: { id: true },
-  });
-  if (duplicate) {
-    return { error: "Já existe um usuário cadastrado com este e-mail." };
-  }
+    const created = await tx.user.create({
+      data: {
+        name,
+        email,
+        passwordHash: null,
+        emailVerifiedAt: null,
+        role,
+        teamId,
+        cfHandle,
+        lcHandle,
+        avatarColor,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+      },
+    });
 
-  const created = await prisma.user.create({
-    data: {
-      name,
-      email,
-      passwordHash: null,
-      emailVerifiedAt: null,
-      role,
-      teamId,
-      cfHandle,
-      lcHandle,
-      avatarColor,
-    },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-    },
+    return { created, teamName };
   });
 
-  const verification = await issueVerificationForUser(created, teamName);
+  if ("error" in txResult) {
+    return { error: txResult.error };
+  }
 
+  const verification = await issueVerificationForUser(
+    txResult.created,
+    txResult.teamName
+  );
+
+  if (teamId) {
+    updateTag(CACHE_TAGS.teamMembers(teamId));
+  }
   revalidatePath("/admin");
   revalidatePath("/membros");
 
@@ -249,14 +291,13 @@ export async function createTeamMemberByAdminAction(input: {
     emailSent: verification.emailSent,
     deliveryMode: verification.deliveryMode,
     emailError: verification.emailError,
-    devPreview:
-      !verification.emailSent
-        ? {
-            email: created.email,
-            code: verification.code,
-            activationUrl: verification.activationUrl,
-          }
-        : undefined,
+    devPreview: !verification.emailSent
+      ? {
+          email: txResult.created.email,
+          code: verification.code,
+          activationUrl: verification.activationUrl,
+        }
+      : undefined,
   };
 }
 
@@ -295,14 +336,13 @@ export async function resendVerificationAction(
     emailSent: verification.emailSent,
     deliveryMode: verification.deliveryMode,
     emailError: verification.emailError,
-    devPreview:
-      !verification.emailSent
-        ? {
-            email: user.email,
-            code: verification.code,
-            activationUrl: verification.activationUrl,
-          }
-        : undefined,
+    devPreview: !verification.emailSent
+      ? {
+          email: user.email,
+          code: verification.code,
+          activationUrl: verification.activationUrl,
+        }
+      : undefined,
   };
 }
 
@@ -312,37 +352,47 @@ export async function assignUserTeamAction(
 ): Promise<{ error?: string }> {
   const admin = await requireGlobalAdmin();
 
-  const targetUser = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true, email: true, name: true, role: true, teamId: true },
-  });
-  if (!targetUser) {
-    return { error: "Usuário não encontrado." };
-  }
-
-  if (teamId) {
-    const team = await prisma.team.findUnique({
-      where: { id: teamId },
-      include: { _count: { select: { members: true } } },
+  const txResult = await prisma.$transaction(async (tx) => {
+    const targetUser = await tx.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, name: true, role: true, teamId: true },
     });
-    if (!team) {
-      return { error: "Equipe não encontrada." };
+    if (!targetUser) {
+      return { error: "Usuário não encontrado." };
     }
-    if (
-      targetUser.teamId !== teamId &&
-      team.maxMembers > 0 &&
-      team._count.members >= team.maxMembers
-    ) {
-      return {
-        error: `A equipe "${team.name}" já atingiu o limite de ${team.maxMembers} membros.`,
-      };
+
+    if (teamId) {
+      const team = await tx.team.findUnique({
+        where: { id: teamId },
+        include: { _count: { select: { members: true } } },
+      });
+      if (!team) {
+        return { error: "Equipe não encontrada." };
+      }
+      if (
+        targetUser.teamId !== teamId &&
+        team.maxMembers > 0 &&
+        team._count.members >= team.maxMembers
+      ) {
+        return {
+          error: `A equipe "${team.name}" já atingiu o limite de ${team.maxMembers} membros.`,
+        };
+      }
     }
+
+    await tx.user.update({
+      where: { id: userId },
+      data: { teamId },
+    });
+
+    return { targetUser };
+  });
+
+  if ("error" in txResult) {
+    return { error: txResult.error };
   }
 
-  await prisma.user.update({
-    where: { id: userId },
-    data: { teamId },
-  });
+  const { targetUser } = txResult;
 
   if (targetUser.id === admin.id) {
     await createSession({
@@ -353,6 +403,16 @@ export async function assignUserTeamAction(
       teamId,
     });
   }
+
+  if (targetUser.teamId) {
+    updateTag(CACHE_TAGS.teamMembers(targetUser.teamId));
+    updateTag(CACHE_TAGS.teamStats(targetUser.teamId));
+  }
+  if (teamId) {
+    updateTag(CACHE_TAGS.teamMembers(teamId));
+    updateTag(CACHE_TAGS.teamStats(teamId));
+  }
+  updateTag(CACHE_TAGS.userNav(targetUser.id));
 
   revalidatePath("/admin");
   revalidatePath("/", "layout");
@@ -400,6 +460,10 @@ export async function toggleUserRoleAction(
     });
   }
 
+  updateTag(CACHE_TAGS.userNav(targetUser.id));
+  if (targetUser.teamId) {
+    updateTag(CACHE_TAGS.teamMembers(targetUser.teamId));
+  }
   revalidatePath("/admin");
   revalidatePath("/", "layout");
   return {};

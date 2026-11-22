@@ -7,8 +7,6 @@ export const metadata: Metadata = {
   title: "Meu Perfil — Nunca Foi ICPC",
 };
 
-export const dynamic = "force-dynamic";
-
 export default async function PerfilPage() {
   const currentUser = await requireUser();
 

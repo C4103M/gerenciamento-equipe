@@ -3,6 +3,8 @@
 import type { Difficulty, Platform } from "@prisma/client";
 import {
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Code2,
   ExternalLink,
   Filter,
@@ -17,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import {
   deleteProblemLogAction,
   toggleNeedsReviewAction,
@@ -31,19 +33,34 @@ import {
 import { CodeforcesSyncModal } from "@/components/CodeforcesSyncModal";
 import { PeriodFilterButton } from "@/components/PeriodFilterButton";
 import { ProblemFormModal } from "@/components/ProblemFormModal";
-import { isDateInPeriod, type PeriodFilterValue } from "@/lib/period";
+import type { PeriodFilterValue } from "@/lib/period";
 import { DIFFICULTY_META, PLATFORM_META } from "@/lib/platform";
 import { cn, formatRelativeDate } from "@/lib/utils";
 import type { MemberSummary, ProblemLogItem, TopicItem } from "@/types";
 
+export type QuestoesStatusFilter = "ALL" | "SOLVED" | "REVIEW";
+
+export interface QuestoesFilterState {
+  q: string;
+  member: string;
+  topic: string;
+  platform: "ALL" | Platform;
+  difficulty: "ALL" | Difficulty;
+  status: QuestoesStatusFilter;
+  period: PeriodFilterValue;
+}
+
 export interface QuestoesClientProps {
   currentUserId: string;
   initialProblems: ProblemLogItem[];
+  filteredCount: number;
+  totalTeamCount: number;
+  currentPage: number;
+  pageSize: number;
   topics: TopicItem[];
   members: MemberSummary[];
+  initialFilters: QuestoesFilterState;
 }
-
-type StatusFilter = "ALL" | "SOLVED" | "REVIEW";
 
 const PLATFORMS: Platform[] = [
   "CODEFORCES",
@@ -64,24 +81,55 @@ const DIFFICULTIES: Difficulty[] = [
 const SELECT_CLASS =
   "w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 transition focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20";
 
-/** Client-side searchable, filterable list and management view for team problem logs. */
+function buildQuestoesUrl(
+  filters: QuestoesFilterState,
+  page: number
+): string {
+  const sp = new URLSearchParams();
+  if (filters.q) sp.set("q", filters.q);
+  if (filters.member !== "ALL") sp.set("member", filters.member);
+  if (filters.topic !== "ALL") sp.set("topic", filters.topic);
+  if (filters.platform !== "ALL") sp.set("platform", filters.platform);
+  if (filters.difficulty !== "ALL") sp.set("difficulty", filters.difficulty);
+  if (filters.status !== "ALL") sp.set("status", filters.status);
+  if (filters.period.preset !== "all") {
+    sp.set("periodo", filters.period.preset);
+    if (filters.period.preset === "custom") {
+      if (filters.period.from) sp.set("from", filters.period.from);
+      if (filters.period.to) sp.set("to", filters.period.to);
+    }
+  }
+  if (page > 1) sp.set("page", String(page));
+
+  const query = sp.toString();
+  return query ? `/questoes?${query}` : "/questoes";
+}
+
+/** Server-paginated, filterable list and management view for team problem logs. */
 export function QuestoesClient({
   currentUserId,
   initialProblems,
+  filteredCount,
+  totalTeamCount,
+  currentPage,
+  pageSize,
   topics,
   members,
+  initialFilters,
 }: QuestoesClientProps) {
   const router = useRouter();
+  const [isNavigating, startTransition] = useTransition();
 
-  const [search, setSearch] = useState("");
-  const [memberId, setMemberId] = useState<string>("ALL");
-  const [topicId, setTopicId] = useState<string>("ALL");
-  const [platform, setPlatform] = useState<"ALL" | Platform>("ALL");
-  const [difficulty, setDifficulty] = useState<"ALL" | Difficulty>("ALL");
-  const [status, setStatus] = useState<StatusFilter>("ALL");
-  const [periodFilter, setPeriodFilter] = useState<PeriodFilterValue>({
-    preset: "all",
-  });
+  const [prevInitialQ, setPrevInitialQ] = useState(initialFilters.q);
+  const [search, setSearch] = useState(initialFilters.q);
+  if (initialFilters.q !== prevInitialQ) {
+    setPrevInitialQ(initialFilters.q);
+    if (search === prevInitialQ) {
+      setSearch(initialFilters.q);
+    }
+  }
+
+  const debounceTimerRef = useRef<number | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
@@ -93,66 +141,67 @@ export function QuestoesClient({
   const [pendingActionId, setPendingActionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current !== null) {
+        window.clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, []);
+
   const hasActiveFilters =
-    search.trim().length > 0 ||
-    memberId !== "ALL" ||
-    topicId !== "ALL" ||
-    platform !== "ALL" ||
-    difficulty !== "ALL" ||
-    status !== "ALL" ||
-    periodFilter.preset !== "all";
+    initialFilters.q.length > 0 ||
+    initialFilters.member !== "ALL" ||
+    initialFilters.topic !== "ALL" ||
+    initialFilters.platform !== "ALL" ||
+    initialFilters.difficulty !== "ALL" ||
+    initialFilters.status !== "ALL" ||
+    initialFilters.period.preset !== "all";
 
-  const filteredProblems = useMemo(() => {
-    const query = search.trim().toLowerCase();
+  const totalPages = Math.max(1, Math.ceil(filteredCount / pageSize));
+  const rangeStart = filteredCount === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const rangeEnd = Math.min(filteredCount, currentPage * pageSize);
 
-    return initialProblems.filter((problem) => {
-      if (query) {
-        const matchesTitle = problem.title.toLowerCase().includes(query);
-        const matchesNotes =
-          problem.notes?.toLowerCase().includes(query) ?? false;
-        if (!matchesTitle && !matchesNotes) return false;
-      }
-
-      if (memberId !== "ALL" && problem.userId !== memberId) return false;
-      if (
-        topicId !== "ALL" &&
-        !problem.topics.some((topic) => topic.id === topicId)
-      ) {
-        return false;
-      }
-      if (platform !== "ALL" && problem.platform !== platform) return false;
-      if (difficulty !== "ALL" && problem.perceivedDifficulty !== difficulty) {
-        return false;
-      }
-      if (status === "SOLVED" && !problem.solved) return false;
-      if (status === "REVIEW" && !problem.needsReview) return false;
-      if (
-        !isDateInPeriod(problem.reviewedAt ?? problem.createdAt, periodFilter)
-      ) {
-        return false;
-      }
-
-      return true;
+  function applyFilterPatch(patch: Partial<QuestoesFilterState>) {
+    const nextFilters: QuestoesFilterState = {
+      ...initialFilters,
+      ...patch,
+    };
+    const url = buildQuestoesUrl(nextFilters, 1);
+    startTransition(() => {
+      router.replace(url, { scroll: false });
     });
-  }, [
-    initialProblems,
-    search,
-    memberId,
-    topicId,
-    platform,
-    difficulty,
-    status,
-    periodFilter,
-  ]);
+  }
+
+  function handleSearchChange(nextValue: string) {
+    setSearch(nextValue);
+    if (debounceTimerRef.current !== null) {
+      window.clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = window.setTimeout(() => {
+      debounceTimerRef.current = null;
+      applyFilterPatch({ q: nextValue.trim() });
+    }, 300);
+  }
 
   function clearFilters() {
+    if (debounceTimerRef.current !== null) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
     setSearch("");
-    setMemberId("ALL");
-    setTopicId("ALL");
-    setPlatform("ALL");
-    setDifficulty("ALL");
-    setStatus("ALL");
-    setPeriodFilter({ preset: "all" });
+    startTransition(() => {
+      router.replace("/questoes", { scroll: false });
+    });
+  }
+
+  function goToPage(nextPage: number) {
+    const clamped = Math.max(1, Math.min(totalPages, nextPage));
+    if (clamped === currentPage) return;
+    const url = buildQuestoesUrl(initialFilters, clamped);
+    startTransition(() => {
+      router.push(url, { scroll: true });
+    });
   }
 
   function openCreateModal() {
@@ -254,14 +303,14 @@ export function QuestoesClient({
             <input
               type="search"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => handleSearchChange(e.target.value)}
               placeholder="Buscar por título ou observação..."
               aria-label="Buscar por título ou observação"
               className="w-full rounded-lg border border-zinc-800 bg-zinc-950 py-2 pr-3.5 pl-9 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
             />
           </div>
 
-          {hasActiveFilters ? (
+          {hasActiveFilters || search.trim().length > 0 ? (
             <button
               type="button"
               onClick={clearFilters}
@@ -280,8 +329,8 @@ export function QuestoesClient({
             </label>
             <select
               id="filter-member"
-              value={memberId}
-              onChange={(e) => setMemberId(e.target.value)}
+              value={initialFilters.member}
+              onChange={(e) => applyFilterPatch({ member: e.target.value })}
               className={SELECT_CLASS}
             >
               <option value="ALL">Membro: Todos</option>
@@ -299,8 +348,8 @@ export function QuestoesClient({
             </label>
             <select
               id="filter-topic"
-              value={topicId}
-              onChange={(e) => setTopicId(e.target.value)}
+              value={initialFilters.topic}
+              onChange={(e) => applyFilterPatch({ topic: e.target.value })}
               className={SELECT_CLASS}
             >
               <option value="ALL">Tópico: Todos</option>
@@ -318,9 +367,11 @@ export function QuestoesClient({
             </label>
             <select
               id="filter-platform"
-              value={platform}
+              value={initialFilters.platform}
               onChange={(e) =>
-                setPlatform(e.target.value as "ALL" | Platform)
+                applyFilterPatch({
+                  platform: e.target.value as "ALL" | Platform,
+                })
               }
               className={SELECT_CLASS}
             >
@@ -339,9 +390,11 @@ export function QuestoesClient({
             </label>
             <select
               id="filter-difficulty"
-              value={difficulty}
+              value={initialFilters.difficulty}
               onChange={(e) =>
-                setDifficulty(e.target.value as "ALL" | Difficulty)
+                applyFilterPatch({
+                  difficulty: e.target.value as "ALL" | Difficulty,
+                })
               }
               className={SELECT_CLASS}
             >
@@ -360,8 +413,12 @@ export function QuestoesClient({
             </label>
             <select
               id="filter-status"
-              value={status}
-              onChange={(e) => setStatus(e.target.value as StatusFilter)}
+              value={initialFilters.status}
+              onChange={(e) =>
+                applyFilterPatch({
+                  status: e.target.value as QuestoesStatusFilter,
+                })
+              }
               className={SELECT_CLASS}
             >
               <option value="ALL">Status: Todos</option>
@@ -371,8 +428,8 @@ export function QuestoesClient({
           </div>
 
           <PeriodFilterButton
-            value={periodFilter}
-            onChange={setPeriodFilter}
+            value={initialFilters.period}
+            onChange={(nextPeriod) => applyFilterPatch({ period: nextPeriod })}
             variant="filter"
             align="right"
           />
@@ -398,36 +455,58 @@ export function QuestoesClient({
       ) : null}
 
       {/* Count Header */}
-      <div className="flex items-center justify-between text-xs text-zinc-400">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
         <div className="flex items-center gap-2">
           <Filter className="h-3.5 w-3.5 text-zinc-500" aria-hidden="true" />
           <span>
-            Exibindo{" "}
-            <strong className="font-semibold text-zinc-200">
-              {filteredProblems.length}
-            </strong>{" "}
-            de{" "}
-            <strong className="font-semibold text-zinc-200">
-              {initialProblems.length}
-            </strong>{" "}
-            {initialProblems.length === 1 ? "questão" : "questões"}
+            {filteredCount === 0 ? (
+              <>
+                Exibindo <strong className="font-semibold text-zinc-200">0</strong>{" "}
+                questões
+              </>
+            ) : (
+              <>
+                Exibindo{" "}
+                <strong className="font-semibold text-zinc-200">
+                  {rangeStart}–{rangeEnd}
+                </strong>{" "}
+                de{" "}
+                <strong className="font-semibold text-zinc-200">
+                  {filteredCount}
+                </strong>{" "}
+                {filteredCount === 1 ? "questão" : "questões"}
+              </>
+            )}
+            {hasActiveFilters && totalTeamCount !== filteredCount ? (
+              <span className="text-zinc-500">
+                {" "}
+                (de {totalTeamCount} no total)
+              </span>
+            ) : null}
           </span>
         </div>
+
+        {isNavigating ? (
+          <span className="inline-flex items-center gap-1.5 text-indigo-300">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            <span>Atualizando...</span>
+          </span>
+        ) : null}
       </div>
 
       {/* Problem List */}
-      {filteredProblems.length === 0 ? (
+      {initialProblems.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/30 px-6 py-14 text-center">
           <span className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-400">
             <Code2 className="h-6 w-6" aria-hidden="true" />
           </span>
           <h2 className="text-base font-semibold text-zinc-200">
-            {initialProblems.length === 0
+            {totalTeamCount === 0
               ? "Nenhuma questão registrada ainda"
               : "Nenhuma questão encontrada"}
           </h2>
           <p className="mt-1 max-w-md text-sm text-zinc-400">
-            {initialProblems.length === 0
+            {totalTeamCount === 0
               ? "Comece registrando a primeira questão praticada pela equipe."
               : "Tente ajustar os termos de busca ou limpar os filtros ativos."}
           </p>
@@ -454,186 +533,235 @@ export function QuestoesClient({
           </div>
         </div>
       ) : (
-        <ul className="space-y-3">
-          {filteredProblems.map((problem) => {
-            const isOwner = problem.userId === currentUserId;
-            const isBusy = pendingActionId === problem.id;
-            const isConfirmingDelete = confirmDeleteId === problem.id;
+        <>
+          <ul
+            className={cn(
+              "space-y-3 transition-opacity",
+              isNavigating && "opacity-60"
+            )}
+          >
+            {initialProblems.map((problem) => {
+              const isOwner = problem.userId === currentUserId;
+              const isBusy = pendingActionId === problem.id;
+              const isConfirmingDelete = confirmDeleteId === problem.id;
 
-            return (
-              <li
-                key={problem.id}
-                className="rounded-xl border border-zinc-800/90 bg-zinc-900/65 p-4 transition hover:border-zinc-700/90"
-              >
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  {/* Main Content */}
-                  <div className="min-w-0 flex-1 space-y-2.5">
-                    {/* Title & Badges Row */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <a
-                        href={problem.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="group inline-flex min-w-0 items-center gap-1.5 text-base font-semibold text-zinc-100 transition hover:text-indigo-400"
-                      >
-                        <span className="truncate">{problem.title}</span>
-                        <ExternalLink
-                          className="h-3.5 w-3.5 shrink-0 text-zinc-500 transition group-hover:text-indigo-400"
-                          aria-hidden="true"
-                        />
-                      </a>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <PlatformBadge platform={problem.platform} />
-                      {problem.externalRating ? (
-                        <span className="inline-flex items-center rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-medium text-sky-300">
-                          CF {problem.externalRating}
-                        </span>
-                      ) : null}
-                      <DifficultyBadge difficulty={problem.perceivedDifficulty} />
-
-                      {problem.solved ? (
-                        <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300">
-                          <CheckCircle2
-                            className="h-3 w-3 shrink-0"
+              return (
+                <li
+                  key={problem.id}
+                  className="rounded-xl border border-zinc-800/90 bg-zinc-900/65 p-4 transition hover:border-zinc-700/90"
+                >
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    {/* Main Content */}
+                    <div className="min-w-0 flex-1 space-y-2.5">
+                      {/* Title & Badges Row */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <a
+                          href={problem.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="group inline-flex min-w-0 items-center gap-1.5 text-base font-semibold text-zinc-100 transition hover:text-indigo-400"
+                        >
+                          <span className="truncate">{problem.title}</span>
+                          <ExternalLink
+                            className="h-3.5 w-3.5 shrink-0 text-zinc-500 transition group-hover:text-indigo-400"
                             aria-hidden="true"
                           />
-                          Resolvida
-                        </span>
-                      ) : null}
-
-                      {problem.needsReview ? (
-                        <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">
-                          <RotateCcw
-                            className="h-3 w-3 shrink-0"
-                            aria-hidden="true"
-                          />
-                          Na Lista de Revisão
-                        </span>
-                      ) : null}
-
-                      {problem.topics.map((topic) => (
-                        <TopicBadge key={topic.id} topic={topic} />
-                      ))}
-                    </div>
-
-                    {/* Notes Box */}
-                    {problem.notes ? (
-                      <div className="flex items-start gap-2 rounded-lg border border-zinc-800/80 bg-zinc-950/70 px-3 py-2 text-xs leading-relaxed text-zinc-300">
-                        <MessageSquareText
-                          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-500"
-                          aria-hidden="true"
-                        />
-                        <p className="whitespace-pre-wrap break-words">
-                          {problem.notes}
-                        </p>
+                        </a>
                       </div>
-                    ) : null}
 
-                    {/* Author & Metadata */}
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
-                      <span className="inline-flex items-center gap-2 font-medium text-zinc-300">
-                        <MemberAvatar member={problem.user} size="sm" />
-                        <span>{problem.user.name}</span>
-                      </span>
-                      <span className="text-zinc-600" aria-hidden="true">
-                        •
-                      </span>
-                      <span>{formatRelativeDate(problem.createdAt)}</span>
-                      <span className="text-zinc-600" aria-hidden="true">
-                        •
-                      </span>
-                      <span className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-300">
-                        {problem.attemptCount}{" "}
-                        {problem.attemptCount === 1
-                          ? "tentativa"
-                          : "tentativas"}
-                      </span>
-                    </div>
-                  </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <PlatformBadge platform={problem.platform} />
+                        {problem.externalRating ? (
+                          <span className="inline-flex items-center rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-medium text-sky-300">
+                            CF {problem.externalRating}
+                          </span>
+                        ) : null}
+                        <DifficultyBadge
+                          difficulty={problem.perceivedDifficulty}
+                        />
 
-                  {/* Owner Actions */}
-                  {isOwner ? (
-                    <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-zinc-800/70 pt-2.5 lg:border-t-0 lg:pt-0">
-                      <button
-                        type="button"
-                        onClick={() => void handleToggleReview(problem)}
-                        disabled={!problem.solved || isBusy}
-                        title={
-                          problem.solved
-                            ? problem.needsReview
-                              ? "Remover da lista de revisão"
-                              : "Adicionar à lista de revisão"
-                            : "Questões não resolvidas permanecem na lista de revisão até serem resolvidas."
-                        }
-                        className={cn(
-                          "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
-                          !problem.solved
-                            ? "cursor-not-allowed border-zinc-800 bg-zinc-950/50 text-zinc-500 opacity-60"
-                            : problem.needsReview
-                              ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
-                              : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800 hover:text-zinc-100"
-                        )}
-                      >
-                        {isBusy ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <RotateCcw className="h-3.5 w-3.5" />
-                        )}
-                        <span>
-                          {problem.needsReview ? "Em Revisão" : "Revisar"}
-                        </span>
-                      </button>
+                        {problem.solved ? (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300">
+                            <CheckCircle2
+                              className="h-3 w-3 shrink-0"
+                              aria-hidden="true"
+                            />
+                            Resolvida
+                          </span>
+                        ) : null}
 
-                      <button
-                        type="button"
-                        onClick={() => openEditModal(problem)}
-                        disabled={isBusy}
-                        aria-label={`Editar ${problem.title}`}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-800 hover:text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-50"
-                      >
-                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Editar</span>
-                      </button>
+                        {problem.needsReview ? (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">
+                            <RotateCcw
+                              className="h-3 w-3 shrink-0"
+                              aria-hidden="true"
+                            />
+                            Na Lista de Revisão
+                          </span>
+                        ) : null}
 
-                      {isConfirmingDelete ? (
-                        <div className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/10 p-1">
-                          <button
-                            type="button"
-                            onClick={() => void handleDelete(problem.id)}
-                            disabled={isBusy}
-                            className="rounded px-2 py-1 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/25 disabled:opacity-50"
-                          >
-                            {isBusy ? "Excluindo..." : "Confirmar"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDeleteId(null)}
-                            disabled={isBusy}
-                            className="rounded px-2 py-1 text-xs font-medium text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
-                          >
-                            Cancelar
-                          </button>
+                        {problem.topics.map((topic) => (
+                          <TopicBadge key={topic.id} topic={topic} />
+                        ))}
+                      </div>
+
+                      {/* Notes Box */}
+                      {problem.notes ? (
+                        <div className="flex items-start gap-2 rounded-lg border border-zinc-800/80 bg-zinc-950/70 px-3 py-2 text-xs leading-relaxed text-zinc-300">
+                          <MessageSquareText
+                            className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-500"
+                            aria-hidden="true"
+                          />
+                          <p className="whitespace-pre-wrap break-words">
+                            {problem.notes}
+                          </p>
                         </div>
-                      ) : (
+                      ) : null}
+
+                      {/* Author & Metadata */}
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+                        <span className="inline-flex items-center gap-2 font-medium text-zinc-300">
+                          <MemberAvatar member={problem.user} size="sm" />
+                          <span>{problem.user.name}</span>
+                        </span>
+                        <span className="text-zinc-600" aria-hidden="true">
+                          •
+                        </span>
+                        <span>{formatRelativeDate(problem.createdAt)}</span>
+                        <span className="text-zinc-600" aria-hidden="true">
+                          •
+                        </span>
+                        <span className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-300">
+                          {problem.attemptCount}{" "}
+                          {problem.attemptCount === 1
+                            ? "tentativa"
+                            : "tentativas"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Owner Actions */}
+                    {isOwner ? (
+                      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-zinc-800/70 pt-2.5 lg:border-t-0 lg:pt-0">
                         <button
                           type="button"
-                          onClick={() => setConfirmDeleteId(problem.id)}
-                          disabled={isBusy}
-                          aria-label={`Excluir ${problem.title}`}
-                          className="inline-flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400 transition hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-50"
+                          onClick={() => void handleToggleReview(problem)}
+                          disabled={!problem.solved || isBusy}
+                          title={
+                            problem.solved
+                              ? problem.needsReview
+                                ? "Remover da lista de revisão"
+                                : "Adicionar à lista de revisão"
+                              : "Questões não resolvidas permanecem na lista de revisão até serem resolvidas."
+                          }
+                          className={cn(
+                            "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
+                            !problem.solved
+                              ? "cursor-not-allowed border-zinc-800 bg-zinc-950/50 text-zinc-500 opacity-60"
+                              : problem.needsReview
+                                ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                                : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800 hover:text-zinc-100"
+                          )}
                         >
-                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          {isBusy ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          )}
+                          <span>
+                            {problem.needsReview ? "Em Revisão" : "Revisar"}
+                          </span>
                         </button>
-                      )}
-                    </div>
-                  ) : null}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+
+                        <button
+                          type="button"
+                          onClick={() => openEditModal(problem)}
+                          disabled={isBusy}
+                          aria-label={`Editar ${problem.title}`}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-800 hover:text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-50"
+                        >
+                          <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Editar</span>
+                        </button>
+
+                        {isConfirmingDelete ? (
+                          <div className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/10 p-1">
+                            <button
+                              type="button"
+                              onClick={() => void handleDelete(problem.id)}
+                              disabled={isBusy}
+                              className="rounded px-2 py-1 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/25 disabled:opacity-50"
+                            >
+                              {isBusy ? "Excluindo..." : "Confirmar"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(null)}
+                              disabled={isBusy}
+                              className="rounded px-2 py-1 text-xs font-medium text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteId(problem.id)}
+                            disabled={isBusy}
+                            aria-label={`Excluir ${problem.title}`}
+                            className="inline-flex items-center justify-center rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400 transition hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+
+          {/* Pagination Controls */}
+          {totalPages > 1 ? (
+            <nav
+              aria-label="Paginação de questões"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 px-4 py-3 text-xs text-zinc-300"
+            >
+              <span className="text-zinc-400">
+                Página{" "}
+                <strong className="font-mono font-semibold text-zinc-100">
+                  {currentPage}
+                </strong>{" "}
+                de{" "}
+                <strong className="font-mono font-semibold text-zinc-100">
+                  {totalPages}
+                </strong>
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => goToPage(currentPage - 1)}
+                  disabled={currentPage <= 1 || isNavigating}
+                  className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-1.5 font-medium text-zinc-200 transition hover:border-zinc-700 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Anterior</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goToPage(currentPage + 1)}
+                  disabled={currentPage >= totalPages || isNavigating}
+                  className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-1.5 font-medium text-zinc-200 transition hover:border-zinc-700 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <span>Próxima</span>
+                  <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            </nav>
+          ) : null}
+        </>
       )}
 
       <ProblemFormModal

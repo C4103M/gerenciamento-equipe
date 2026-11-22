@@ -1,9 +1,12 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { requireUser } from "@/lib/auth";
+import { CACHE_TAGS } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 import { slugify } from "@/lib/utils";
+
+const MAX_TOPIC_NAME_LENGTH = 80;
 
 const TOPIC_PALETTE = [
   "#38bdf8",
@@ -26,8 +29,10 @@ export async function createTopicAction(
   await requireUser();
 
   const cleanName = name.trim();
-  if (cleanName.length < 2) {
-    return { error: "O nome do tópico deve ter pelo menos 2 caracteres." };
+  if (cleanName.length < 2 || cleanName.length > MAX_TOPIC_NAME_LENGTH) {
+    return {
+      error: `O nome do tópico deve ter entre 2 e ${MAX_TOPIC_NAME_LENGTH} caracteres.`,
+    };
   }
 
   const slug = slugify(cleanName);
@@ -57,6 +62,7 @@ export async function createTopicAction(
     },
   });
 
+  updateTag(CACHE_TAGS.topics);
   revalidatePath("/questoes");
   revalidatePath("/propostos");
   revalidatePath("/");

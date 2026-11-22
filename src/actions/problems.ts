@@ -1,12 +1,17 @@
 "use server";
 
 import type { Difficulty } from "@prisma/client";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { requireTeamMember } from "@/lib/auth";
+import { CACHE_TAGS } from "@/lib/cache";
 import { parseCodeforcesRef } from "@/lib/codeforces";
 import { NotificationService } from "@/lib/notifications";
 import { detectPlatform } from "@/lib/platform";
 import { prisma } from "@/lib/prisma";
+import { sanitizeHttpUrl } from "@/lib/url";
+
+const MAX_TITLE_LENGTH = 300;
+const MAX_NOTES_LENGTH = 10000;
 
 export interface ProblemLogInput {
   title: string;
@@ -21,24 +26,21 @@ export interface ProblemLogInput {
   externalRating?: number | null;
 }
 
-function normalizeUrl(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return "";
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return `https://${trimmed}`;
-}
-
 function resolveProblemReference(
   rawUrl: string,
   fallbackExternalId?: string | null
-): { url: string; externalId: string | null } {
+): { url: string; externalId: string | null } | null {
   const cfRef = parseCodeforcesRef(rawUrl);
   if (cfRef) {
     return { url: cfRef.canonicalUrl, externalId: cfRef.externalId };
   }
+  const safeUrl = sanitizeHttpUrl(rawUrl);
+  if (!safeUrl) {
+    return null;
+  }
   return {
-    url: normalizeUrl(rawUrl),
-    externalId: fallbackExternalId?.trim() || null,
+    url: safeUrl,
+    externalId: fallbackExternalId?.trim().slice(0, 120) || null,
   };
 }
 
@@ -54,29 +56,36 @@ export async function createProblemLogAction(input: ProblemLogInput): Promise<{
   const user = await requireTeamMember();
 
   const title = input.title.trim();
-  const { url, externalId } = resolveProblemReference(
-    input.url,
-    input.externalId
-  );
+  const ref = resolveProblemReference(input.url, input.externalId);
   const topicIds = Array.from(new Set(input.topicIds)).filter(Boolean);
   const attemptCount = normalizeAttemptCount(input.attemptCount);
+  const notes = input.notes?.trim() || null;
   const externalRating =
     typeof input.externalRating === "number" &&
     Number.isFinite(input.externalRating)
       ? Math.round(input.externalRating)
       : null;
 
-  if (title.length < 2) {
-    return { error: "Informe o título da questão." };
+  if (title.length < 2 || title.length > MAX_TITLE_LENGTH) {
+    return {
+      error: `O título da questão deve ter entre 2 e ${MAX_TITLE_LENGTH} caracteres.`,
+    };
   }
-  if (!url) {
-    return { error: "Informe o link da questão (Codeforces, LeetCode, etc.)." };
+  if (!ref) {
+    return {
+      error: "Informe um link válido (http:// ou https://) para a questão.",
+    };
   }
   if (topicIds.length === 0) {
     return { error: "Selecione pelo menos 1 tópico." };
   }
+  if (notes && notes.length > MAX_NOTES_LENGTH) {
+    return {
+      error: `As observações não podem exceder ${MAX_NOTES_LENGTH} caracteres.`,
+    };
+  }
 
-  const platform = detectPlatform(url);
+  const platform = detectPlatform(ref.url);
   const needsReview = !input.solved ? true : Boolean(input.needsReview);
 
   const created = await prisma.problemLog.create({
@@ -84,15 +93,15 @@ export async function createProblemLogAction(input: ProblemLogInput): Promise<{
       teamId: user.teamId,
       userId: user.id,
       title,
-      url,
+      url: ref.url,
       platform,
-      externalId,
+      externalId: ref.externalId,
       externalRating,
       perceivedDifficulty: input.perceivedDifficulty,
       solved: input.solved,
       needsReview,
       attemptCount,
-      notes: input.notes?.trim() || null,
+      notes,
       topics: {
         connect: topicIds.map((id) => ({ id })),
       },
@@ -100,6 +109,8 @@ export async function createProblemLogAction(input: ProblemLogInput): Promise<{
     select: { id: true },
   });
 
+  updateTag(CACHE_TAGS.teamStats(user.teamId));
+  updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/");
   revalidatePath("/questoes");
   revalidatePath("/revisao");
@@ -133,55 +144,65 @@ export async function updateProblemLogAction(
   }
 
   const title = input.title.trim();
-  const { url, externalId } = resolveProblemReference(
-    input.url,
-    input.externalId
-  );
+  const ref = resolveProblemReference(input.url, input.externalId);
   const topicIds = Array.from(new Set(input.topicIds)).filter(Boolean);
   const attemptCount = normalizeAttemptCount(input.attemptCount);
+  const notes = input.notes?.trim() || null;
+
+  if (title.length < 2 || title.length > MAX_TITLE_LENGTH) {
+    return {
+      error: `O título da questão deve ter entre 2 e ${MAX_TITLE_LENGTH} caracteres.`,
+    };
+  }
+  if (!ref) {
+    return {
+      error: "Informe um link válido (http:// ou https://) para a questão.",
+    };
+  }
+  if (topicIds.length === 0) {
+    return { error: "Selecione pelo menos 1 tópico." };
+  }
+  if (notes && notes.length > MAX_NOTES_LENGTH) {
+    return {
+      error: `As observações não podem exceder ${MAX_NOTES_LENGTH} caracteres.`,
+    };
+  }
+
   const externalRating =
     input.externalRating !== undefined
       ? typeof input.externalRating === "number" &&
         Number.isFinite(input.externalRating)
         ? Math.round(input.externalRating)
         : null
-      : externalId && externalId === existing.externalId
+      : ref.externalId && ref.externalId === existing.externalId
         ? existing.externalRating
         : null;
 
-  if (title.length < 2) {
-    return { error: "Informe o título da questão." };
-  }
-  if (!url) {
-    return { error: "Informe o link da questão." };
-  }
-  if (topicIds.length === 0) {
-    return { error: "Selecione pelo menos 1 tópico." };
-  }
-
-  const platform = detectPlatform(url);
+  const platform = detectPlatform(ref.url);
   const needsReview = !input.solved ? true : Boolean(input.needsReview);
 
   await prisma.problemLog.update({
     where: { id },
     data: {
       title,
-      url,
+      url: ref.url,
       platform,
-      externalId,
+      externalId: ref.externalId,
       externalRating,
       perceivedDifficulty: input.perceivedDifficulty,
       solved: input.solved,
       needsReview,
       reviewedAt: input.solved && !needsReview ? existing.reviewedAt : null,
       attemptCount,
-      notes: input.notes?.trim() || null,
+      notes,
       topics: {
         set: topicIds.map((topicId) => ({ id: topicId })),
       },
     },
   });
 
+  updateTag(CACHE_TAGS.teamStats(user.teamId));
+  updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/");
   revalidatePath("/questoes");
   revalidatePath("/revisao");
@@ -220,6 +241,13 @@ export async function resolveReviewProblemAction(
     return { error: "Você só pode concluir revisões da sua própria lista." };
   }
 
+  const trimmedNotes = params.notes?.trim();
+  if (trimmedNotes && trimmedNotes.length > MAX_NOTES_LENGTH) {
+    return {
+      error: `As observações não podem exceder ${MAX_NOTES_LENGTH} caracteres.`,
+    };
+  }
+
   const hasExplicitAttemptCount =
     typeof params.attemptCount === "number" &&
     Number.isFinite(params.attemptCount) &&
@@ -235,28 +263,49 @@ export async function resolveReviewProblemAction(
         ? Math.floor(params.attemptCount!)
         : { increment: 1 },
       perceivedDifficulty: params.perceivedDifficulty,
-      notes: params.notes?.trim() || existing.notes,
+      notes: trimmedNotes || existing.notes,
     },
   });
 
-  for (const proposal of existing.fromProposals) {
-    if (proposal.status !== "FEITO") {
-      await prisma.proposedProblem.update({
-        where: { id: proposal.id },
-        data: { status: "FEITO" },
-      });
+  const proposalsToComplete = existing.fromProposals.filter(
+    (proposal) => proposal.status !== "FEITO"
+  );
 
-      await NotificationService.notifyProposalStatusUpdated({
-        proposerId: proposal.proposer.id,
-        proposerEmail: proposal.proposer.email,
-        assigneeName: user.name,
-        problemTitle: proposal.title,
-        status: "FEITO",
-        proposedProblemId: proposal.id,
-      });
+  if (proposalsToComplete.length > 0) {
+    await prisma.proposedProblem.updateMany({
+      where: {
+        id: { in: proposalsToComplete.map((p) => p.id) },
+      },
+      data: { status: "FEITO" },
+    });
+
+    const proposalsToNotify = proposalsToComplete.filter(
+      (proposal) => proposal.proposer.id !== user.id
+    );
+
+    if (proposalsToNotify.length > 0) {
+      await NotificationService.notifyProposalStatusUpdatedBatch(
+        proposalsToNotify.map((proposal) => ({
+          proposerId: proposal.proposer.id,
+          proposerEmail: proposal.proposer.email,
+          assigneeName: user.name,
+          problemTitle: proposal.title,
+          status: "FEITO" as const,
+          proposedProblemId: proposal.id,
+        }))
+      );
+
+      const notifiedProposers = new Set(
+        proposalsToNotify.map((p) => p.proposer.id)
+      );
+      for (const proposerId of notifiedProposers) {
+        updateTag(CACHE_TAGS.userNav(proposerId));
+      }
     }
   }
 
+  updateTag(CACHE_TAGS.teamStats(user.teamId));
+  updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/");
   revalidatePath("/questoes");
   revalidatePath("/revisao");
@@ -296,6 +345,8 @@ export async function toggleNeedsReviewAction(
     data: { needsReview },
   });
 
+  updateTag(CACHE_TAGS.teamStats(user.teamId));
+  updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/");
   revalidatePath("/questoes");
   revalidatePath("/revisao");
@@ -321,6 +372,8 @@ export async function deleteProblemLogAction(
 
   await prisma.problemLog.delete({ where: { id } });
 
+  updateTag(CACHE_TAGS.teamStats(user.teamId));
+  updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/");
   revalidatePath("/questoes");
   revalidatePath("/revisao");

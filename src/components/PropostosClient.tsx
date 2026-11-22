@@ -4,6 +4,7 @@ import type { Difficulty, ProposalStatus } from "@prisma/client";
 import {
   AlertTriangle,
   ArrowRight,
+  Bookmark,
   CheckCircle2,
   ExternalLink,
   Eye,
@@ -37,6 +38,7 @@ import type { MemberSummary, ProposedProblemItem, TopicItem } from "@/types";
 
 export interface PropostosClientProps {
   currentUserId: string;
+  currentUser: MemberSummary;
   proposals: ProposedProblemItem[];
   teammates: MemberSummary[];
   topics: TopicItem[];
@@ -44,10 +46,10 @@ export interface PropostosClientProps {
   highlightId?: string;
 }
 
-type ProposalsTab = "recebidos" | "enviados" | "todos";
+type ProposalsTab = "recebidos" | "salvos" | "enviados" | "todos";
 type StatusFilter = "ALL" | ProposalStatus;
 
-const VALID_TABS: ProposalsTab[] = ["recebidos", "enviados", "todos"];
+const VALID_TABS: ProposalsTab[] = ["recebidos", "salvos", "enviados", "todos"];
 
 const STATUS_FILTER_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
   { value: "ALL", label: "Todos" },
@@ -80,6 +82,7 @@ interface StatusModalState {
 /** Client interface for viewing, proposing, and responding to team problem proposals. */
 export function PropostosClient({
   currentUserId,
+  currentUser,
   proposals,
   teammates,
   topics,
@@ -92,7 +95,9 @@ export function PropostosClient({
     resolveInitialTab(initialTab)
   );
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
-  const [proposeModalOpen, setProposeModalOpen] = useState(false);
+  const [proposeModalMode, setProposeModalMode] = useState<
+    "propose" | "self" | null
+  >(null);
   const [statusModal, setStatusModal] = useState<StatusModalState | null>(null);
   const [busyProposalId, setBusyProposalId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -107,13 +112,20 @@ export function PropostosClient({
 
   const tabCounts = useMemo(() => {
     let recebidos = 0;
+    let salvos = 0;
     let enviados = 0;
     for (const p of proposals) {
-      if (p.assigneeId === currentUserId) recebidos += 1;
-      if (p.proposerId === currentUserId) enviados += 1;
+      const isSelfSaved = p.proposerId === p.assigneeId;
+      if (isSelfSaved) {
+        if (p.assigneeId === currentUserId) salvos += 1;
+      } else {
+        if (p.assigneeId === currentUserId) recebidos += 1;
+        if (p.proposerId === currentUserId) enviados += 1;
+      }
     }
     return {
       recebidos,
+      salvos,
       enviados,
       todos: proposals.length,
     };
@@ -121,8 +133,16 @@ export function PropostosClient({
 
   const tabProposals = useMemo(() => {
     return proposals.filter((p) => {
-      if (activeTab === "recebidos") return p.assigneeId === currentUserId;
-      if (activeTab === "enviados") return p.proposerId === currentUserId;
+      const isSelfSaved = p.proposerId === p.assigneeId;
+      if (activeTab === "recebidos") {
+        return p.assigneeId === currentUserId && !isSelfSaved;
+      }
+      if (activeTab === "salvos") {
+        return p.assigneeId === currentUserId && isSelfSaved;
+      }
+      if (activeTab === "enviados") {
+        return p.proposerId === currentUserId && !isSelfSaved;
+      }
       return true;
     });
   }, [proposals, activeTab, currentUserId]);
@@ -150,7 +170,11 @@ export function PropostosClient({
   }
 
   function handleProblemLinkClick(proposal: ProposedProblemItem) {
-    if (proposal.assigneeId === currentUserId && proposal.status === "PENDENTE") {
+    if (
+      proposal.assigneeId === currentUserId &&
+      proposal.proposerId !== proposal.assigneeId &&
+      proposal.status === "PENDENTE"
+    ) {
       void markProposalViewedAction(proposal.id).then(() => {
         router.refresh();
       });
@@ -212,14 +236,25 @@ export function PropostosClient({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setProposeModalOpen(true)}
-          className="inline-flex items-center justify-center gap-2 self-start rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-indigo-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 sm:self-auto"
-        >
-          <Plus className="h-4 w-4" aria-hidden="true" />
-          <span>+ Propor Problema</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={() => setProposeModalMode("self")}
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2.5 text-sm font-semibold text-amber-200 transition-colors hover:bg-amber-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+          >
+            <Bookmark className="h-4 w-4" aria-hidden="true" />
+            <span>+ Salvar p/ Depois</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setProposeModalMode("propose")}
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-indigo-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            <span>+ Propor Problema</span>
+          </button>
+        </div>
       </div>
 
       {actionError ? (
@@ -258,9 +293,28 @@ export function PropostosClient({
                 : "text-zinc-400 hover:text-zinc-200"
             )}
           >
-            <span>Recebidos por Mim</span>
+            <span>Recebidos de Colegas</span>
             <span className="rounded-full bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">
               {tabCounts.recebidos}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "salvos"}
+            onClick={() => setActiveTab("salvos")}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium transition-colors",
+              activeTab === "salvos"
+                ? "bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40"
+                : "text-zinc-400 hover:text-zinc-200"
+            )}
+          >
+            <Bookmark className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Para Fazer Depois</span>
+            <span className="rounded-full bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">
+              {tabCounts.salvos}
             </span>
           </button>
 
@@ -335,17 +389,25 @@ export function PropostosClient({
       {filteredProposals.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/30 px-6 py-14 text-center">
           <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-400">
-            <Send className="h-5 w-5 text-indigo-400" />
+            {activeTab === "salvos" ? (
+              <Bookmark className="h-5 w-5 text-amber-400" />
+            ) : (
+              <Send className="h-5 w-5 text-indigo-400" />
+            )}
           </div>
           <h2 className="text-base font-semibold text-zinc-100">
-            Nenhum problema proposto encontrado
+            {activeTab === "salvos"
+              ? "Nenhuma questão salva para depois"
+              : "Nenhum problema proposto encontrado"}
           </h2>
           <p className="mt-1 max-w-md text-sm text-zinc-400">
             {statusFilter !== "ALL"
-              ? "Não há propostas com este status na aba selecionada."
-              : activeTab === "recebidos"
-                ? "Quando alguém da equipe indicar uma questão para você, ela aparecerá aqui."
-                : "Use o botão acima para propor um problema para seus colegas."}
+              ? "Não há itens com este status na aba selecionada."
+              : activeTab === "salvos"
+                ? 'Salve questões para praticar depois usando o botão "+ Salvar p/ Depois".'
+                : activeTab === "recebidos"
+                  ? "Quando alguém da equipe indicar uma questão para você, ela aparecerá aqui."
+                  : "Use o botão acima para propor um problema para seus colegas."}
           </p>
         </div>
       ) : (
@@ -353,6 +415,7 @@ export function PropostosClient({
           {filteredProposals.map((proposal) => {
             const isAssignee = proposal.assigneeId === currentUserId;
             const isProposer = proposal.proposerId === currentUserId;
+            const isSelfSaved = proposal.proposerId === proposal.assigneeId;
             const isBusy = busyProposalId === proposal.id;
             const isHighlighted = highlightId === proposal.id;
             const canRespond =
@@ -371,37 +434,59 @@ export function PropostosClient({
                     : "border-zinc-800/90 hover:border-zinc-700/90"
                 )}
               >
-                {/* Top row: Proposer -> Assignee + Delete */}
+                {/* Top row: Proposer -> Assignee (or Self-Saved) + Delete */}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <div className="flex items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-950/80 py-1 pr-2.5 pl-1.5">
-                      <MemberAvatar member={proposal.proposer} size="sm" />
-                      <span className="font-medium text-zinc-200">
-                        {proposal.proposer.name}
-                      </span>
-                      {isProposer ? (
-                        <span className="text-[10px] font-semibold text-indigo-400">
-                          (você)
+                    {isSelfSaved ? (
+                      <>
+                        <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300">
+                          <Bookmark className="h-3 w-3" aria-hidden="true" />
+                          <span>Para fazer depois</span>
                         </span>
-                      ) : null}
-                    </div>
+                        <div className="flex items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-950/80 py-1 pr-2.5 pl-1.5">
+                          <MemberAvatar member={proposal.assignee} size="sm" />
+                          <span className="font-medium text-zinc-200">
+                            {proposal.assignee.name}
+                          </span>
+                          {isAssignee ? (
+                            <span className="text-[10px] font-semibold text-indigo-400">
+                              (você)
+                            </span>
+                          ) : null}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-950/80 py-1 pr-2.5 pl-1.5">
+                          <MemberAvatar member={proposal.proposer} size="sm" />
+                          <span className="font-medium text-zinc-200">
+                            {proposal.proposer.name}
+                          </span>
+                          {isProposer ? (
+                            <span className="text-[10px] font-semibold text-indigo-400">
+                              (você)
+                            </span>
+                          ) : null}
+                        </div>
 
-                    <ArrowRight
-                      className="h-3.5 w-3.5 text-zinc-500"
-                      aria-hidden="true"
-                    />
+                        <ArrowRight
+                          className="h-3.5 w-3.5 text-zinc-500"
+                          aria-hidden="true"
+                        />
 
-                    <div className="flex items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-950/80 py-1 pr-2.5 pl-1.5">
-                      <MemberAvatar member={proposal.assignee} size="sm" />
-                      <span className="font-medium text-zinc-200">
-                        {proposal.assignee.name}
-                      </span>
-                      {isAssignee ? (
-                        <span className="text-[10px] font-semibold text-indigo-400">
-                          (você)
-                        </span>
-                      ) : null}
-                    </div>
+                        <div className="flex items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-950/80 py-1 pr-2.5 pl-1.5">
+                          <MemberAvatar member={proposal.assignee} size="sm" />
+                          <span className="font-medium text-zinc-200">
+                            {proposal.assignee.name}
+                          </span>
+                          {isAssignee ? (
+                            <span className="text-[10px] font-semibold text-indigo-400">
+                              (você)
+                            </span>
+                          ) : null}
+                        </div>
+                      </>
+                    )}
 
                     <span className="text-zinc-600">·</span>
                     <span className="text-zinc-400">
@@ -480,9 +565,10 @@ export function PropostosClient({
 
                 {/* Assignee Interactive Controls */}
                 {isAssignee &&
-                (proposal.status === "PENDENTE" || canRespond) ? (
+                ((!isSelfSaved && proposal.status === "PENDENTE") ||
+                  canRespond) ? (
                   <div className="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-800/70 pt-3">
-                    {proposal.status === "PENDENTE" ? (
+                    {!isSelfSaved && proposal.status === "PENDENTE" ? (
                       <button
                         type="button"
                         onClick={() => void handleMarkViewed(proposal.id)}
@@ -549,10 +635,12 @@ export function PropostosClient({
         </div>
       )}
 
-      {/* Propose Problem Modal */}
+      {/* Propose / Save For Later Problem Modal */}
       <ProposeProblemModal
-        open={proposeModalOpen}
-        onClose={() => setProposeModalOpen(false)}
+        open={proposeModalMode !== null}
+        onClose={() => setProposeModalMode(null)}
+        currentUser={currentUser}
+        defaultSelfOnly={proposeModalMode === "self"}
         teammates={teammates}
         topics={topics}
       />

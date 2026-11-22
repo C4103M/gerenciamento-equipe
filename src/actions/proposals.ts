@@ -1,12 +1,18 @@
 "use server";
 
 import type { Difficulty, ProposalStatus } from "@prisma/client";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { requireTeamMember } from "@/lib/auth";
+import { CACHE_TAGS } from "@/lib/cache";
 import { parseCodeforcesRef } from "@/lib/codeforces";
 import { NotificationService } from "@/lib/notifications";
 import { detectPlatform } from "@/lib/platform";
 import { prisma } from "@/lib/prisma";
+import { sanitizeHttpUrl } from "@/lib/url";
+
+const MAX_TITLE_LENGTH = 300;
+const MAX_MESSAGE_LENGTH = 5000;
+const MAX_NOTES_LENGTH = 10000;
 
 export interface ProposeProblemInput {
   assigneeIds: string[];
@@ -17,38 +23,39 @@ export interface ProposeProblemInput {
   message?: string;
 }
 
-function normalizeUrl(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return "";
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return `https://${trimmed}`;
-}
-
 export async function proposeProblemAction(
   input: ProposeProblemInput
 ): Promise<{ error?: string; count?: number }> {
   const proposer = await requireTeamMember();
 
-  const assigneeIds = Array.from(new Set(input.assigneeIds)).filter(
-    (id) => id && id !== proposer.id
-  );
+  const assigneeIds = Array.from(new Set(input.assigneeIds)).filter(Boolean);
   const title = input.title.trim();
   const cfRef = parseCodeforcesRef(input.url);
-  const url = cfRef ? cfRef.canonicalUrl : normalizeUrl(input.url);
+  const url = cfRef ? cfRef.canonicalUrl : sanitizeHttpUrl(input.url);
   const externalId = cfRef ? cfRef.externalId : null;
   const topicIds = Array.from(new Set(input.topicIds)).filter(Boolean);
+  const message = input.message?.trim() || null;
 
   if (assigneeIds.length === 0) {
     return { error: "Selecione pelo menos 1 membro da equipe para propor." };
   }
-  if (title.length < 2) {
-    return { error: "Informe o título da questão." };
+  if (title.length < 2 || title.length > MAX_TITLE_LENGTH) {
+    return {
+      error: `O título da questão deve ter entre 2 e ${MAX_TITLE_LENGTH} caracteres.`,
+    };
   }
   if (!url) {
-    return { error: "Informe o link da questão (Codeforces, LeetCode, etc.)." };
+    return {
+      error: "Informe um link válido (http:// ou https://) para a questão.",
+    };
   }
   if (topicIds.length === 0) {
     return { error: "Selecione pelo menos 1 tópico." };
+  }
+  if (message && message.length > MAX_MESSAGE_LENGTH) {
+    return {
+      error: `A mensagem não pode exceder ${MAX_MESSAGE_LENGTH} caracteres.`,
+    };
   }
 
   const assignees = await prisma.user.findMany({
@@ -65,34 +72,51 @@ export async function proposeProblemAction(
 
   const platform = detectPlatform(url);
 
-  for (const assignee of assignees) {
-    const proposal = await prisma.proposedProblem.create({
-      data: {
-        teamId: proposer.teamId,
-        proposerId: proposer.id,
-        assigneeId: assignee.id,
-        title,
-        url,
-        platform,
-        externalId,
-        suggestedDifficulty: input.suggestedDifficulty || null,
-        message: input.message?.trim() || null,
-        status: "PENDENTE",
-        topics: {
-          connect: topicIds.map((id) => ({ id })),
+  const createdProposals = await Promise.all(
+    assignees.map((assignee) =>
+      prisma.proposedProblem.create({
+        data: {
+          teamId: proposer.teamId,
+          proposerId: proposer.id,
+          assigneeId: assignee.id,
+          title,
+          url,
+          platform,
+          externalId,
+          suggestedDifficulty: input.suggestedDifficulty || null,
+          message,
+          status: "PENDENTE",
+          topics: {
+            connect: topicIds.map((id) => ({ id })),
+          },
         },
-      },
+        select: { id: true, assigneeId: true },
+      })
+    )
+  );
+
+  const assigneeById = new Map(assignees.map((a) => [a.id, a]));
+  const notificationsToSend = createdProposals
+    .filter((proposal) => proposal.assigneeId !== proposer.id)
+    .map((proposal) => {
+      const assignee = assigneeById.get(proposal.assigneeId)!;
+      return {
+        assigneeId: assignee.id,
+        assigneeEmail: assignee.email,
+        proposerName: proposer.name,
+        problemTitle: title,
+        proposedProblemId: proposal.id,
+      };
     });
 
-    await NotificationService.notifyProblemProposed({
-      assigneeId: assignee.id,
-      assigneeEmail: assignee.email,
-      proposerName: proposer.name,
-      problemTitle: title,
-      proposedProblemId: proposal.id,
-    });
+  if (notificationsToSend.length > 0) {
+    await NotificationService.notifyProblemProposedBatch(notificationsToSend);
   }
 
+  updateTag(CACHE_TAGS.teamStats(proposer.teamId));
+  for (const assignee of assignees) {
+    updateTag(CACHE_TAGS.userNav(assignee.id));
+  }
   revalidatePath("/");
   revalidatePath("/propostos");
   revalidatePath("/notificacoes");
@@ -118,7 +142,7 @@ export async function markProposalViewedAction(
   if (proposal.assigneeId !== user.id) {
     return { error: "Apenas o destinatário pode marcar como visualizado." };
   }
-  if (proposal.status !== "PENDENTE") {
+  if (proposal.proposerId === user.id || proposal.status !== "PENDENTE") {
     return {};
   }
 
@@ -139,6 +163,9 @@ export async function markProposalViewedAction(
     proposedProblemId: proposal.id,
   });
 
+  updateTag(CACHE_TAGS.teamStats(user.teamId));
+  updateTag(CACHE_TAGS.userNav(user.id));
+  updateTag(CACHE_TAGS.userNav(proposal.proposer.id));
   revalidatePath("/propostos");
   revalidatePath("/notificacoes");
   return {};
@@ -154,6 +181,13 @@ export async function updateProposalStatusAction(
   }
 ): Promise<{ error?: string }> {
   const user = await requireTeamMember();
+
+  const trimmedNotes = params.notes?.trim();
+  if (trimmedNotes && trimmedNotes.length > MAX_NOTES_LENGTH) {
+    return {
+      error: `As observações não podem exceder ${MAX_NOTES_LENGTH} caracteres.`,
+    };
+  }
 
   const proposal = await prisma.proposedProblem.findUnique({
     where: { id: proposalId },
@@ -198,7 +232,7 @@ export async function updateProposalStatusAction(
           needsReview,
           reviewedAt: solved ? new Date() : null,
           attemptCount: parsedAttemptCount ?? { increment: 1 },
-          notes: params.notes?.trim() || undefined,
+          notes: trimmedNotes || undefined,
         },
       });
     } else {
@@ -218,8 +252,10 @@ export async function updateProposalStatusAction(
           needsReview,
           attemptCount: parsedAttemptCount ?? 1,
           notes:
-            params.notes?.trim() ||
-            `Questão proposta por ${proposal.proposer.name}.`,
+            trimmedNotes ||
+            (proposal.proposerId === user.id
+              ? "Questão salva para fazer depois."
+              : `Questão proposta por ${proposal.proposer.name}.`),
           topics: {
             connect: topicIds,
           },
@@ -239,7 +275,7 @@ export async function updateProposalStatusAction(
     },
   });
 
-  if (proposal.status !== nextStatus) {
+  if (proposal.status !== nextStatus && proposal.proposer.id !== user.id) {
     await NotificationService.notifyProposalStatusUpdated({
       proposerId: proposal.proposer.id,
       proposerEmail: proposal.proposer.email,
@@ -250,6 +286,9 @@ export async function updateProposalStatusAction(
     });
   }
 
+  updateTag(CACHE_TAGS.teamStats(user.teamId));
+  updateTag(CACHE_TAGS.userNav(user.id));
+  updateTag(CACHE_TAGS.userNav(proposal.proposer.id));
   revalidatePath("/");
   revalidatePath("/questoes");
   revalidatePath("/revisao");
@@ -267,7 +306,7 @@ export async function deleteProposalAction(
 
   const proposal = await prisma.proposedProblem.findUnique({
     where: { id: proposalId },
-    select: { proposerId: true, teamId: true },
+    select: { proposerId: true, assigneeId: true, teamId: true },
   });
 
   if (!proposal || proposal.teamId !== user.teamId) {
@@ -279,6 +318,8 @@ export async function deleteProposalAction(
 
   await prisma.proposedProblem.delete({ where: { id: proposalId } });
 
+  updateTag(CACHE_TAGS.teamStats(user.teamId));
+  updateTag(CACHE_TAGS.userNav(proposal.assigneeId));
   revalidatePath("/");
   revalidatePath("/propostos");
   revalidatePath("/notificacoes");

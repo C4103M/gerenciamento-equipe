@@ -1,12 +1,36 @@
+import type { Difficulty, Platform, Prisma } from "@prisma/client";
 import type { Metadata } from "next";
 import { QuestoesClient } from "@/components/QuestoesClient";
 import { requireTeamMember } from "@/lib/auth";
+import { getCachedTeamMembers, getCachedTopics } from "@/lib/cache";
+import {
+  buildPrismaProblemPeriodWhere,
+  parsePeriodSearchParams,
+} from "@/lib/period";
 import { prisma } from "@/lib/prisma";
 import type { MemberSummary, ProblemLogItem, TopicItem } from "@/types";
 
 export const metadata: Metadata = {
   title: "Questões — Nunca Foi ICPC",
 };
+
+const PAGE_SIZE = 20;
+
+const VALID_PLATFORMS = new Set<Platform>([
+  "CODEFORCES",
+  "LEETCODE",
+  "ATCODER",
+  "BEECROWD",
+  "CSES",
+  "OUTRO",
+]);
+
+const VALID_DIFFICULTIES = new Set<Difficulty>([
+  "FACIL",
+  "MEDIO",
+  "DIFICIL",
+  "MUITO_DIFICIL",
+]);
 
 const MEMBER_SELECT = {
   id: true,
@@ -25,31 +49,143 @@ const TOPIC_SELECT = {
   color: true,
 } as const;
 
-export default async function QuestoesPage() {
-  const currentUser = await requireTeamMember();
+type StatusFilter = "ALL" | "SOLVED" | "REVIEW";
 
-  const [problemLogsRaw, topicsRaw, membersRaw] = await Promise.all([
-    prisma.problemLog.findMany({
-      where: { teamId: currentUser.teamId },
-      include: {
-        user: { select: MEMBER_SELECT },
-        topics: {
-          select: TOPIC_SELECT,
-          orderBy: { name: "asc" },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    }),
-    prisma.topic.findMany({
-      select: TOPIC_SELECT,
-      orderBy: { name: "asc" },
-    }),
-    prisma.user.findMany({
-      where: { teamId: currentUser.teamId },
-      select: MEMBER_SELECT,
-      orderBy: { createdAt: "asc" },
-    }),
+function parseStatusFilter(raw?: string): StatusFilter {
+  if (raw === "SOLVED" || raw === "REVIEW") return raw;
+  return "ALL";
+}
+
+export default async function QuestoesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    q?: string;
+    member?: string;
+    topic?: string;
+    platform?: string;
+    difficulty?: string;
+    status?: string;
+    periodo?: string;
+    from?: string;
+    to?: string;
+    page?: string;
+  }>;
+}) {
+  const [resolvedParams, currentUser] = await Promise.all([
+    searchParams,
+    requireTeamMember(),
   ]);
+
+  const q = resolvedParams.q?.trim() ?? "";
+  const member = resolvedParams.member?.trim() || "ALL";
+  const topic = resolvedParams.topic?.trim() || "ALL";
+  const platform: "ALL" | Platform =
+    resolvedParams.platform &&
+    VALID_PLATFORMS.has(resolvedParams.platform as Platform)
+      ? (resolvedParams.platform as Platform)
+      : "ALL";
+  const difficulty: "ALL" | Difficulty =
+    resolvedParams.difficulty &&
+    VALID_DIFFICULTIES.has(resolvedParams.difficulty as Difficulty)
+      ? (resolvedParams.difficulty as Difficulty)
+      : "ALL";
+  const status = parseStatusFilter(resolvedParams.status);
+  const periodFilter = parsePeriodSearchParams(resolvedParams);
+
+  const parsedPage = Number.parseInt(resolvedParams.page ?? "1", 10);
+  const requestedPage =
+    Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : 1;
+
+  const andConditions: Prisma.ProblemLogWhereInput[] = [
+    { teamId: currentUser.teamId },
+  ];
+
+  if (q) {
+    andConditions.push({
+      OR: [
+        { title: { contains: q, mode: "insensitive" } },
+        { notes: { contains: q, mode: "insensitive" } },
+      ],
+    });
+  }
+  if (member !== "ALL") {
+    andConditions.push({ userId: member });
+  }
+  if (topic !== "ALL") {
+    andConditions.push({ topics: { some: { id: topic } } });
+  }
+  if (platform !== "ALL") {
+    andConditions.push({ platform });
+  }
+  if (difficulty !== "ALL") {
+    andConditions.push({ perceivedDifficulty: difficulty });
+  }
+  if (status === "SOLVED") {
+    andConditions.push({ solved: true });
+  } else if (status === "REVIEW") {
+    andConditions.push({ needsReview: true });
+  }
+
+  const periodWhere = buildPrismaProblemPeriodWhere(periodFilter);
+  if (Object.keys(periodWhere).length > 0) {
+    andConditions.push(periodWhere as Prisma.ProblemLogWhereInput);
+  }
+
+  const where: Prisma.ProblemLogWhereInput =
+    andConditions.length === 1 ? andConditions[0] : { AND: andConditions };
+
+  const hasActiveFilters =
+    q.length > 0 ||
+    member !== "ALL" ||
+    topic !== "ALL" ||
+    platform !== "ALL" ||
+    difficulty !== "ALL" ||
+    status !== "ALL" ||
+    periodFilter.preset !== "all";
+
+  const [initialLogsRaw, filteredCount, totalTeamCountRaw, topics, members] =
+    await Promise.all([
+      prisma.problemLog.findMany({
+        where,
+        include: {
+          user: { select: MEMBER_SELECT },
+          topics: {
+            select: TOPIC_SELECT,
+            orderBy: { name: "asc" },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: PAGE_SIZE,
+        skip: (requestedPage - 1) * PAGE_SIZE,
+      }),
+      prisma.problemLog.count({ where }),
+      hasActiveFilters
+        ? prisma.problemLog.count({ where: { teamId: currentUser.teamId } })
+        : Promise.resolve(null),
+      getCachedTopics(),
+      getCachedTeamMembers(currentUser.teamId),
+    ]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredCount / PAGE_SIZE));
+  const currentPage = Math.min(requestedPage, totalPages);
+
+  const problemLogsRaw =
+    requestedPage > totalPages && filteredCount > 0
+      ? await prisma.problemLog.findMany({
+          where,
+          include: {
+            user: { select: MEMBER_SELECT },
+            topics: {
+              select: TOPIC_SELECT,
+              orderBy: { name: "asc" },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+          take: PAGE_SIZE,
+          skip: (currentPage - 1) * PAGE_SIZE,
+        })
+      : initialLogsRaw;
 
   const initialProblems: ProblemLogItem[] = problemLogsRaw.map((log) => ({
     id: log.id,
@@ -76,18 +212,28 @@ export default async function QuestoesPage() {
     topics: log.topics,
   }));
 
-  const topics: TopicItem[] = topicsRaw;
-  const members: MemberSummary[] = membersRaw.map((m) => ({
-    ...m,
-    cfLastSyncedAt: m.cfLastSyncedAt ? m.cfLastSyncedAt.toISOString() : null,
-  }));
+  const serializedTopics: TopicItem[] = topics;
+  const serializedMembers: MemberSummary[] = members;
 
   return (
     <QuestoesClient
       currentUserId={currentUser.id}
       initialProblems={initialProblems}
-      topics={topics}
-      members={members}
+      filteredCount={filteredCount}
+      totalTeamCount={totalTeamCountRaw ?? filteredCount}
+      currentPage={currentPage}
+      pageSize={PAGE_SIZE}
+      topics={serializedTopics}
+      members={serializedMembers}
+      initialFilters={{
+        q,
+        member,
+        topic,
+        platform,
+        difficulty,
+        status,
+        period: periodFilter,
+      }}
     />
   );
 }

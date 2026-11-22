@@ -1,7 +1,16 @@
 "use client";
 
 import type { Difficulty } from "@prisma/client";
-import { Check, Link2, Loader2, Send, Sparkles, Users, X } from "lucide-react";
+import {
+  Bookmark,
+  Check,
+  Link2,
+  Loader2,
+  Send,
+  Sparkles,
+  Users,
+  X,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { lookupCodeforcesProblemAction } from "@/actions/codeforces";
@@ -18,6 +27,8 @@ export interface ProposeProblemModalProps {
   onClose: () => void;
   teammates: MemberSummary[];
   topics: TopicItem[];
+  currentUser?: MemberSummary;
+  defaultSelfOnly?: boolean;
 }
 
 const SUGGESTED_DIFFICULTY_OPTIONS: Array<{
@@ -52,12 +63,14 @@ const SUGGESTED_DIFFICULTY_OPTIONS: Array<{
   },
 ];
 
-/** Modal dialog for proposing a competitive programming problem to teammates. */
+/** Modal dialog for proposing a problem to teammates or saving one for yourself. */
 export function ProposeProblemModal({
   open,
   onClose,
   teammates,
   topics,
+  currentUser,
+  defaultSelfOnly = false,
 }: ProposeProblemModalProps) {
   if (!open) return null;
 
@@ -66,6 +79,8 @@ export function ProposeProblemModal({
       onClose={onClose}
       teammates={teammates}
       topics={topics}
+      currentUser={currentUser}
+      defaultSelfOnly={defaultSelfOnly}
     />
   );
 }
@@ -74,10 +89,14 @@ function ProposeProblemContent({
   onClose,
   teammates,
   topics,
+  currentUser,
+  defaultSelfOnly = false,
 }: Omit<ProposeProblemModalProps, "open">) {
   const router = useRouter();
 
-  const [assigneeIds, setAssigneeIds] = useState<string[]>([]);
+  const [assigneeIds, setAssigneeIds] = useState<string[]>(() =>
+    defaultSelfOnly && currentUser ? [currentUser.id] : []
+  );
   const [title, setTitle] = useState("");
   const [url, setUrl] = useState("");
   const [topicIds, setTopicIds] = useState<string[]>([]);
@@ -210,8 +229,17 @@ function ProposeProblemContent({
       void performCfLookup(pasted, false);
     }
   }
+  const selectableMembers = currentUser
+    ? [currentUser, ...teammates]
+    : teammates;
   const allSelected =
-    teammates.length > 0 && assigneeIds.length === teammates.length;
+    selectableMembers.length > 0 &&
+    assigneeIds.length === selectableMembers.length;
+  const isSelfOnly = Boolean(
+    currentUser &&
+      assigneeIds.length === 1 &&
+      assigneeIds[0] === currentUser.id
+  );
 
   function toggleTeammate(memberId: string) {
     setAssigneeIds((prev) =>
@@ -225,7 +253,7 @@ function ProposeProblemContent({
     if (allSelected) {
       setAssigneeIds([]);
     } else {
-      setAssigneeIds(teammates.map((m) => m.id));
+      setAssigneeIds(selectableMembers.map((m) => m.id));
     }
   }
 
@@ -296,10 +324,14 @@ function ProposeProblemContent({
               id="propose-modal-title"
               className="text-lg font-semibold tracking-tight text-zinc-100"
             >
-              Propor Questão para a Equipe
+              {isSelfOnly
+                ? "Salvar Questão para Depois"
+                : "Propor Questão para a Equipe"}
             </h2>
             <p className="text-xs text-zinc-400">
-              Indique um problema relevante para seus colegas treinarem.
+              {isSelfOnly
+                ? "Salve uma questão na sua fila pessoal para resolver mais tarde."
+                : "Indique um problema relevante para seus colegas treinarem."}
             </p>
           </div>
           <button
@@ -340,7 +372,7 @@ function ProposeProblemContent({
                     Para quem enviar? <span className="text-rose-400">*</span>
                   </span>
                 </span>
-                {teammates.length > 0 ? (
+                {selectableMembers.length > 1 ? (
                   <button
                     type="button"
                     onClick={handleSelectAllToggle}
@@ -351,9 +383,12 @@ function ProposeProblemContent({
                 ) : null}
               </div>
 
-              {teammates.length > 0 ? (
+              {selectableMembers.length > 0 ? (
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {teammates.map((member) => {
+                  {selectableMembers.map((member) => {
+                    const isSelf = Boolean(
+                      currentUser && member.id === currentUser.id
+                    );
                     const checked = assigneeIds.includes(member.id);
                     const handles = [
                       member.cfHandle ? `CF: ${member.cfHandle}` : null,
@@ -368,7 +403,9 @@ function ProposeProblemContent({
                         className={cn(
                           "flex cursor-pointer items-center justify-between gap-3 rounded-xl border p-3 transition-colors",
                           checked
-                            ? "border-indigo-500/60 bg-indigo-500/10"
+                            ? isSelf
+                              ? "border-amber-500/60 bg-amber-500/10"
+                              : "border-indigo-500/60 bg-indigo-500/10"
                             : "border-zinc-800 bg-zinc-950/60 hover:border-zinc-700 hover:bg-zinc-900"
                         )}
                       >
@@ -381,11 +418,21 @@ function ProposeProblemContent({
                         <div className="flex min-w-0 items-center gap-3">
                           <MemberAvatar member={member} size="md" />
                           <div className="min-w-0">
-                            <p className="truncate text-sm font-medium text-zinc-100">
-                              {member.name}
-                            </p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="truncate text-sm font-medium text-zinc-100">
+                                {isSelf ? "Você (Para fazer depois)" : member.name}
+                              </p>
+                              {isSelf ? (
+                                <Bookmark
+                                  className="h-3.5 w-3.5 shrink-0 text-amber-400"
+                                  aria-hidden="true"
+                                />
+                              ) : null}
+                            </div>
                             <p className="truncate text-xs text-zinc-400">
-                              {handles || member.email}
+                              {isSelf
+                                ? "Fila pessoal · sem notificação"
+                                : handles || member.email}
                             </p>
                           </div>
                         </div>
@@ -393,7 +440,9 @@ function ProposeProblemContent({
                           className={cn(
                             "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-colors",
                             checked
-                              ? "border-indigo-500 bg-indigo-500 text-white"
+                              ? isSelf
+                                ? "border-amber-500 bg-amber-500 text-zinc-950"
+                                : "border-indigo-500 bg-indigo-500 text-white"
                               : "border-zinc-700 bg-zinc-900 text-transparent"
                           )}
                           aria-hidden="true"
@@ -406,7 +455,7 @@ function ProposeProblemContent({
                 </div>
               ) : (
                 <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-xs text-zinc-400">
-                  Nenhum outro membro disponível na equipe no momento.
+                  Nenhum membro disponível na equipe no momento.
                 </div>
               )}
             </div>
@@ -582,7 +631,11 @@ function ProposeProblemContent({
                 rows={3}
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                placeholder="Recado ou dica opcional para os colegas (ex: 'Boa para treinar SegTree lazy!')..."
+                placeholder={
+                  isSelfOnly
+                    ? "Lembrete ou anotação para quando for resolver (ex: 'Treinar DP com bitmask')..."
+                    : "Recado ou dica opcional para os colegas (ex: 'Boa para treinar SegTree lazy!')..."
+                }
                 className="w-full resize-y rounded-lg border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
               />
             </div>
@@ -591,9 +644,11 @@ function ProposeProblemContent({
           {/* Footer */}
           <div className="flex items-center justify-between gap-3 border-t border-zinc-800 bg-zinc-900/95 px-6 py-4">
             <span className="text-xs text-zinc-400">
-              {assigneeIds.length > 0
-                ? `${assigneeIds.length} ${assigneeIds.length === 1 ? "membro selecionado" : "membros selecionados"}`
-                : "Selecione ao menos 1 membro"}
+              {isSelfOnly
+                ? "Salvo na sua fila pessoal"
+                : assigneeIds.length > 0
+                  ? `${assigneeIds.length} ${assigneeIds.length === 1 ? "membro selecionado" : "membros selecionados"}`
+                  : "Selecione ao menos 1 membro"}
             </span>
             <div className="flex items-center gap-2.5">
               <button
@@ -612,7 +667,12 @@ function ProposeProblemContent({
                 {isSubmitting ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Enviando...</span>
+                    <span>{isSelfOnly ? "Salvando..." : "Enviando..."}</span>
+                  </>
+                ) : isSelfOnly ? (
+                  <>
+                    <Bookmark className="h-4 w-4" />
+                    <span>Salvar para depois</span>
                   </>
                 ) : (
                   <>

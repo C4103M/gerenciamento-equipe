@@ -20,6 +20,7 @@ import {
 } from "@/components/Badges";
 import { DashboardClient } from "@/components/DashboardClient";
 import { requireTeamMember } from "@/lib/auth";
+import { getCachedTeamMembers, getCachedTopics } from "@/lib/cache";
 import {
   buildPrismaProblemPeriodWhere,
   formatPeriodLabel,
@@ -29,31 +30,8 @@ import { prisma } from "@/lib/prisma";
 import { cn, formatRelativeDate } from "@/lib/utils";
 import type { MemberSummary, TopicItem } from "@/types";
 
-export const dynamic = "force-dynamic";
-
 interface TopTopicStat extends TopicItem {
   count: number;
-}
-
-function computeTopTopics(
-  logs: Array<{ topics: TopicItem[] }>,
-  limit = 3
-): TopTopicStat[] {
-  const counts = new Map<string, TopTopicStat>();
-  for (const log of logs) {
-    for (const topic of log.topics) {
-      const existing = counts.get(topic.id);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        counts.set(topic.id, { ...topic, count: 1 });
-      }
-    }
-  }
-
-  return Array.from(counts.values())
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR"))
-    .slice(0, limit);
 }
 
 export default async function DashboardPage({
@@ -71,34 +49,19 @@ export default async function DashboardPage({
   const isPeriodFiltered = periodFilter.preset !== "all";
   const periodLabel = formatPeriodLabel(periodFilter);
 
-  const [usersRaw, latestLogs, allLogsAgg, topicsRaw, openProposalsCount] =
+  const [teamMembers, serializedTopics, logsSummary, latestLogs, openProposalsCount] =
     await Promise.all([
-      prisma.user.findMany({
-        where: { teamId: currentUser.teamId },
-        orderBy: { createdAt: "asc" },
+      getCachedTeamMembers(currentUser.teamId),
+      getCachedTopics(),
+      prisma.problemLog.findMany({
+        where: { teamId: currentUser.teamId, ...periodWhere },
         select: {
-          id: true,
-          name: true,
-          email: true,
-          cfHandle: true,
-          lcHandle: true,
-          avatarColor: true,
-          problemLogs: {
-            where: { teamId: currentUser.teamId, ...periodWhere },
-            select: {
-              id: true,
-              solved: true,
-              needsReview: true,
-              attemptCount: true,
-              topics: {
-                select: {
-                  id: true,
-                  name: true,
-                  slug: true,
-                  color: true,
-                },
-              },
-            },
+          userId: true,
+          solved: true,
+          needsReview: true,
+          attemptCount: true,
+          topics: {
+            select: { id: true },
           },
         },
       }),
@@ -127,28 +90,6 @@ export default async function DashboardPage({
           },
         },
       }),
-      prisma.problemLog.findMany({
-        where: { teamId: currentUser.teamId, ...periodWhere },
-        select: {
-          solved: true,
-          needsReview: true,
-        },
-      }),
-      prisma.topic.findMany({
-        orderBy: { name: "asc" },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          color: true,
-          problemLogs: {
-            where: { teamId: currentUser.teamId, ...periodWhere },
-            select: {
-              solved: true,
-            },
-          },
-        },
-      }),
       prisma.proposedProblem.count({
         where: {
           teamId: currentUser.teamId,
@@ -157,43 +98,106 @@ export default async function DashboardPage({
       }),
     ]);
 
-  const totalLogsCount = allLogsAgg.length;
-  const totalSolvedCount = allLogsAgg.filter((l) => l.solved).length;
-  const activeReviewCount = allLogsAgg.filter((l) => l.needsReview).length;
+  const topicsById = new Map<string, TopicItem>(
+    serializedTopics.map((topic) => [topic.id, topic])
+  );
+
+  const memberStatsMap = new Map<
+    string,
+    {
+      totalLogs: number;
+      solvedCount: number;
+      reviewCount: number;
+      totalAttempts: number;
+      topicCounts: Map<string, number>;
+    }
+  >();
+
+  const topicStatsMap = new Map<string, { totalCount: number; solvedCount: number }>();
+
+  let totalSolvedCount = 0;
+  let activeReviewCount = 0;
+
+  for (const log of logsSummary) {
+    if (log.solved) totalSolvedCount += 1;
+    if (log.needsReview) activeReviewCount += 1;
+
+    let mStats = memberStatsMap.get(log.userId);
+    if (!mStats) {
+      mStats = {
+        totalLogs: 0,
+        solvedCount: 0,
+        reviewCount: 0,
+        totalAttempts: 0,
+        topicCounts: new Map<string, number>(),
+      };
+      memberStatsMap.set(log.userId, mStats);
+    }
+
+    mStats.totalLogs += 1;
+    if (log.solved) mStats.solvedCount += 1;
+    if (log.needsReview) mStats.reviewCount += 1;
+    mStats.totalAttempts += log.attemptCount;
+
+    for (const topicRef of log.topics) {
+      mStats.topicCounts.set(
+        topicRef.id,
+        (mStats.topicCounts.get(topicRef.id) ?? 0) + 1
+      );
+
+      const tStats = topicStatsMap.get(topicRef.id);
+      if (tStats) {
+        tStats.totalCount += 1;
+        if (log.solved) tStats.solvedCount += 1;
+      } else {
+        topicStatsMap.set(topicRef.id, {
+          totalCount: 1,
+          solvedCount: log.solved ? 1 : 0,
+        });
+      }
+    }
+  }
+
+  const totalLogsCount = logsSummary.length;
   const resolutionRate =
     totalLogsCount > 0
       ? Math.round((totalSolvedCount / totalLogsCount) * 100)
       : 0;
 
-  const serializedTopics: TopicItem[] = topicsRaw.map((t) => ({
-    id: t.id,
-    name: t.name,
-    slug: t.slug,
-    color: t.color,
-  }));
+  const teammates: MemberSummary[] = teamMembers.filter(
+    (u) => u.id !== currentUser.id
+  );
 
-  const teammates: MemberSummary[] = usersRaw
-    .filter((u) => u.id !== currentUser.id)
-    .map((u) => ({
-      id: u.id,
-      name: u.name,
-      email: u.email,
-      cfHandle: u.cfHandle,
-      lcHandle: u.lcHandle,
-      avatarColor: u.avatarColor,
-    }));
+  const currentUserSummary: MemberSummary = {
+    id: currentUser.id,
+    name: currentUser.name,
+    email: currentUser.email,
+    cfHandle: currentUser.cfHandle,
+    lcHandle: currentUser.lcHandle,
+    avatarColor: currentUser.avatarColor,
+  };
 
-  const memberCards = usersRaw.map((u) => {
-    const totalLogs = u.problemLogs.length;
-    const solvedCount = u.problemLogs.filter((l) => l.solved).length;
-    const reviewCount = u.problemLogs.filter((l) => l.needsReview).length;
-    const totalAttempts = u.problemLogs.reduce(
-      (sum, l) => sum + l.attemptCount,
-      0
-    );
+  const memberCards = teamMembers.map((u) => {
+    const stats = memberStatsMap.get(u.id);
+    const totalLogs = stats?.totalLogs ?? 0;
+    const solvedCount = stats?.solvedCount ?? 0;
+    const reviewCount = stats?.reviewCount ?? 0;
+    const totalAttempts = stats?.totalAttempts ?? 0;
     const accuracyRate =
       totalLogs > 0 ? Math.round((solvedCount / totalLogs) * 100) : 0;
-    const topTopics = computeTopTopics(u.problemLogs, 3);
+
+    const topTopics: TopTopicStat[] = [];
+    if (stats) {
+      for (const [topicId, count] of stats.topicCounts.entries()) {
+        const topic = topicsById.get(topicId);
+        if (topic) {
+          topTopics.push({ ...topic, count });
+        }
+      }
+      topTopics.sort(
+        (a, b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR")
+      );
+    }
 
     return {
       id: u.id,
@@ -208,21 +212,20 @@ export default async function DashboardPage({
       totalLogs,
       totalAttempts,
       accuracyRate,
-      topTopics,
+      topTopics: topTopics.slice(0, 3),
     };
   });
 
-  const topicCoverage = topicsRaw
+  const topicCoverage = serializedTopics
     .map((t) => {
-      const totalCount = t.problemLogs.length;
-      const solvedCount = t.problemLogs.filter((l) => l.solved).length;
+      const counts = topicStatsMap.get(t.id);
       return {
         id: t.id,
         name: t.name,
         slug: t.slug,
         color: t.color,
-        totalCount,
-        solvedCount,
+        totalCount: counts?.totalCount ?? 0,
+        solvedCount: counts?.solvedCount ?? 0,
       };
     })
     .sort(
@@ -273,6 +276,7 @@ export default async function DashboardPage({
         </div>
 
         <DashboardClient
+          currentUser={currentUserSummary}
           topics={serializedTopics}
           teammates={teammates}
           periodFilter={periodFilter}

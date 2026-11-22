@@ -11,9 +11,18 @@ export interface SessionPayload {
 }
 
 function getJwtSecret(): Uint8Array {
-  const secret =
-    process.env.AUTH_SECRET || "nunca-foi-sort-fallback-dev-secret-2026";
-  return new TextEncoder().encode(secret);
+  const secret = process.env.AUTH_SECRET?.trim();
+  if (process.env.NODE_ENV === "production") {
+    if (!secret || secret.length < 32) {
+      throw new Error(
+        "AUTH_SECRET deve estar definido em produção com pelo menos 32 caracteres."
+      );
+    }
+    return new TextEncoder().encode(secret);
+  }
+  return new TextEncoder().encode(
+    secret || "nunca-foi-sort-fallback-dev-secret-2026"
+  );
 }
 
 export async function signSessionToken(payload: SessionPayload): Promise<string> {

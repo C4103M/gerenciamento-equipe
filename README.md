@@ -53,12 +53,18 @@ Plataforma web full-stack para equipes de programação competitiva (como a equi
    - **SMTP (ex: Gmail com Senha de App):** `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` e `EMAIL_FROM`
    - *(Sem essas variáveis, o painel `/admin` exibe um preview local com o código de 6 dígitos e o link `/ativar?token=...` para testes sem precisar de SMTP).*
 
-3. **Sincronize o banco e execute o seed:**
+3. **Aplique as migrations e execute o seed:**
    ```bash
-   npx prisma db push
+   npx prisma migrate deploy
    npm run db:seed
    ```
    O seed cria apenas os 20 tópicos clássicos e o **Administrador Global** configurado em `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+
+   Ao alterar `prisma/schema.prisma` localmente, crie uma migration versionada (sem perda de dados) e versione os arquivos em `prisma/migrations/`:
+   ```bash
+   npm run db:migrate -- --name descricao_da_alteracao
+   npm run db:migrate:status
+   ```
 
 4. **Inicie o servidor de desenvolvimento:**
    ```bash
@@ -71,11 +77,14 @@ Plataforma web full-stack para equipes de programação competitiva (como a equi
 ## Deploy na Vercel com Neon Postgres (Gratuito)
 
 1. Suba o repositório para o GitHub (`.env` permanece ignorado no `.gitignore`).
-2. Importe o projeto na Vercel e adicione **Storage → Neon (Serverless Postgres)** para obter `DATABASE_URL` automaticamente.
+2. Importe o projeto na Vercel e adicione **Storage → Neon (Serverless Postgres)** para obter `DATABASE_URL` e `DATABASE_URL_UNPOOLED` automaticamente.
 3. Configure nas Environment Variables da Vercel: `AUTH_SECRET`, `APP_URL` (ex: `https://seu-app.vercel.app`), `ADMIN_EMAIL`, `ADMIN_PASSWORD`, e seu provedor de e-mail (`RESEND_API_KEY` ou `SMTP_*`).
-4. Com a `DATABASE_URL` do Neon, execute uma vez:
+4. **Migrations automáticas em produção:**
+   - Durante o build de produção na Vercel (`VERCEL_ENV=production`), `npm run build` executa automaticamente [scripts/db-migrate-deploy.mjs](scripts/db-migrate-deploy.mjs) (`prisma migrate deploy` usando `DATABASE_URL_UNPOOLED` + verificação de drift contra `prisma/schema.prisma`) antes de `prisma generate && next build`.
+   - Builds de **Preview** (`VERCEL_ENV=preview`) e builds locais pulam a aplicação automática para proteger o banco compartilhado contra branches não mescladas.
+   - Para aplicar manualmente contra o banco configurado no ambiente atual, use `npm run db:migrate:deploy`.
+5. No primeiro setup de produção, execute uma vez o seed com a `DATABASE_URL` do Neon:
    ```bash
-   npx prisma db push
-   npx prisma db seed
+   npm run db:seed
    ```
-5. Faça o deploy na Vercel.
+6. Faça o deploy na Vercel.

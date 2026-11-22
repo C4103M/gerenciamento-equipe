@@ -14,6 +14,7 @@ const MEMBER_SELECT = {
   email: true,
   cfHandle: true,
   lcHandle: true,
+  cfLastSyncedAt: true,
   avatarColor: true,
 } as const;
 
@@ -56,6 +57,8 @@ export default async function QuestoesPage() {
     title: log.title,
     url: log.url,
     platform: log.platform,
+    externalId: log.externalId,
+    externalRating: log.externalRating,
     perceivedDifficulty: log.perceivedDifficulty,
     solved: log.solved,
     notes: log.notes,
@@ -64,12 +67,20 @@ export default async function QuestoesPage() {
     attemptCount: log.attemptCount,
     createdAt: log.createdAt.toISOString(),
     updatedAt: log.updatedAt.toISOString(),
-    user: log.user,
+    user: {
+      ...log.user,
+      cfLastSyncedAt: log.user.cfLastSyncedAt
+        ? log.user.cfLastSyncedAt.toISOString()
+        : null,
+    },
     topics: log.topics,
   }));
 
   const topics: TopicItem[] = topicsRaw;
-  const members: MemberSummary[] = membersRaw;
+  const members: MemberSummary[] = membersRaw.map((m) => ({
+    ...m,
+    cfLastSyncedAt: m.cfLastSyncedAt ? m.cfLastSyncedAt.toISOString() : null,
+  }));
 
   return (
     <QuestoesClient

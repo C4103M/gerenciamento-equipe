@@ -28,6 +28,8 @@ async function main() {
     { name: 'Union-Find (DSU)', slug: 'union-find-dsu', color: '#facc15', isDefault: true },
     { name: 'Backtracking', slug: 'backtracking', color: '#fb7185', isDefault: true },
     { name: 'Divisão e Conquista', slug: 'divisao-e-conquista', color: '#22d3ee', isDefault: true },
+    { name: 'Implementação / Ad-Hoc', slug: 'implementacao-ad-hoc', color: '#94a3b8', isDefault: true },
+    { name: 'Ordenação', slug: 'ordenacao', color: '#f59e0b', isDefault: true },
   ]
 
   for (const t of topicsData) {

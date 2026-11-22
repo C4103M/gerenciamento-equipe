@@ -8,6 +8,8 @@ import {
   ExternalLink,
   Filter,
   Loader2,
+  Minus,
+  Plus,
   RotateCcw,
   Search,
   Send,
@@ -402,6 +404,9 @@ function ResolveReviewModal({
   const [perceivedDifficulty, setPerceivedDifficulty] = useState<Difficulty>(
     problem.perceivedDifficulty
   );
+  const [attemptCount, setAttemptCount] = useState<number>(
+    Math.max(1, problem.attemptCount + 1)
+  );
   const [notes, setNotes] = useState(problem.notes ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -425,6 +430,7 @@ function ResolveReviewModal({
       const result = await resolveReviewProblemAction(problem.id, {
         perceivedDifficulty,
         notes,
+        attemptCount: Math.max(1, Math.floor(attemptCount || 1)),
       });
 
       if (result.error) {
@@ -515,6 +521,49 @@ function ResolveReviewModal({
                   </button>
                 );
               })}
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label
+              htmlFor="review-attempt-count"
+              className="block text-sm font-medium text-zinc-200"
+            >
+              Número de tentativas
+            </label>
+            <div className="flex w-40 items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1">
+              <button
+                type="button"
+                onClick={() => setAttemptCount((prev) => Math.max(1, prev - 1))}
+                disabled={attemptCount <= 1 || isSubmitting}
+                aria-label="Diminuir número de tentativas"
+                className="inline-flex h-7 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+              >
+                <Minus className="h-3.5 w-3.5" />
+              </button>
+              <input
+                id="review-attempt-count"
+                type="number"
+                min={1}
+                max={999}
+                value={attemptCount}
+                onChange={(e) => {
+                  const val = Number.parseInt(e.target.value, 10);
+                  setAttemptCount(Number.isFinite(val) && val >= 1 ? val : 1);
+                }}
+                className="w-full bg-transparent text-center font-mono text-sm font-semibold text-zinc-100 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setAttemptCount((prev) => Math.min(999, prev + 1))
+                }
+                disabled={isSubmitting}
+                aria-label="Aumentar número de tentativas"
+                className="inline-flex h-7 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
 

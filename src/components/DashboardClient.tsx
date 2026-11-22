@@ -1,20 +1,34 @@
 "use client";
 
 import { Plus, Send } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { PeriodFilterButton } from "@/components/PeriodFilterButton";
 import { ProblemFormModal } from "@/components/ProblemFormModal";
 import { ProposeProblemModal } from "@/components/ProposeProblemModal";
+import { buildPeriodQueryString, type PeriodFilterValue } from "@/lib/period";
 import type { MemberSummary, TopicItem } from "@/types";
 
 export interface DashboardClientProps {
   topics: TopicItem[];
   teammates: MemberSummary[];
+  periodFilter: PeriodFilterValue;
 }
 
 /** Quick action buttons and modal controllers for the team dashboard header. */
-export function DashboardClient({ topics, teammates }: DashboardClientProps) {
+export function DashboardClient({
+  topics,
+  teammates,
+  periodFilter,
+}: DashboardClientProps) {
+  const router = useRouter();
   const [problemModalOpen, setProblemModalOpen] = useState(false);
   const [proposeModalOpen, setProposeModalOpen] = useState(false);
+
+  function handlePeriodChange(next: PeriodFilterValue) {
+    const qs = buildPeriodQueryString(next);
+    router.push(qs ? `/${qs}` : "/");
+  }
 
   return (
     <>
@@ -27,6 +41,13 @@ export function DashboardClient({ topics, teammates }: DashboardClientProps) {
           <Plus className="h-4 w-4" aria-hidden="true" />
           <span>+ Registrar Questão</span>
         </button>
+
+        <PeriodFilterButton
+          value={periodFilter}
+          onChange={handlePeriodChange}
+          variant="header"
+          align="right"
+        />
 
         <button
           type="button"

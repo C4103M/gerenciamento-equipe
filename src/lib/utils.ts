@@ -17,7 +17,8 @@ export function slugify(text: string): string {
 
 export function formatRelativeDate(date: Date | string): string {
   const d = typeof date === "string" ? new Date(date) : date;
-  const diffMs = Date.now() - d.getTime();
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
   const diffMin = Math.floor(diffMs / 60000);
   if (diffMin < 1) return "agora mesmo";
   if (diffMin < 60) return `há ${diffMin} min`;
@@ -25,5 +26,12 @@ export function formatRelativeDate(date: Date | string): string {
   if (diffHours < 24) return `há ${diffHours}h`;
   const diffDays = Math.floor(diffHours / 24);
   if (diffDays < 7) return `há ${diffDays}d`;
+  if (d.getFullYear() !== now.getFullYear()) {
+    return d.toLocaleDateString("pt-BR", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+  }
   return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" });
 }

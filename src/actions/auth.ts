@@ -221,6 +221,8 @@ export async function updateProfileAction(
     }
   }
 
+  const cfHandleChanged = (cfHandle ?? "") !== (currentUser.cfHandle ?? "");
+
   const updated = await prisma.user.update({
     where: { id: currentUser.id },
     data: {
@@ -228,6 +230,7 @@ export async function updateProfileAction(
       email,
       cfHandle,
       lcHandle,
+      ...(cfHandleChanged ? { cfLastSyncedAt: null } : {}),
       avatarColor: /^#[0-9a-fA-F]{6}$/.test(avatarColor)
         ? avatarColor
         : currentUser.avatarColor,

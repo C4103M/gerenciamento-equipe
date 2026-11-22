@@ -3,6 +3,7 @@
 import type { Difficulty, ProposalStatus } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import { requireTeamMember } from "@/lib/auth";
+import { parseCodeforcesRef } from "@/lib/codeforces";
 import { NotificationService } from "@/lib/notifications";
 import { detectPlatform } from "@/lib/platform";
 import { prisma } from "@/lib/prisma";
@@ -32,7 +33,9 @@ export async function proposeProblemAction(
     (id) => id && id !== proposer.id
   );
   const title = input.title.trim();
-  const url = normalizeUrl(input.url);
+  const cfRef = parseCodeforcesRef(input.url);
+  const url = cfRef ? cfRef.canonicalUrl : normalizeUrl(input.url);
+  const externalId = cfRef ? cfRef.externalId : null;
   const topicIds = Array.from(new Set(input.topicIds)).filter(Boolean);
 
   if (assigneeIds.length === 0) {
@@ -71,6 +74,7 @@ export async function proposeProblemAction(
         title,
         url,
         platform,
+        externalId,
         suggestedDifficulty: input.suggestedDifficulty || null,
         message: input.message?.trim() || null,
         status: "PENDENTE",
@@ -146,6 +150,7 @@ export async function updateProposalStatusAction(
     status: ProposalStatus;
     perceivedDifficulty?: Difficulty;
     notes?: string;
+    attemptCount?: number;
   }
 ): Promise<{ error?: string }> {
   const user = await requireTeamMember();
@@ -171,6 +176,12 @@ export async function updateProposalStatusAction(
   const difficulty =
     params.perceivedDifficulty ?? proposal.suggestedDifficulty ?? "MEDIO";
   const topicIds = proposal.topics.map((t) => ({ id: t.id }));
+  const parsedAttemptCount =
+    typeof params.attemptCount === "number" &&
+    Number.isFinite(params.attemptCount) &&
+    params.attemptCount >= 1
+      ? Math.floor(params.attemptCount)
+      : null;
 
   let resultingLogId = proposal.resultingLogId;
 
@@ -186,7 +197,7 @@ export async function updateProposalStatusAction(
           solved,
           needsReview,
           reviewedAt: solved ? new Date() : null,
-          attemptCount: { increment: 1 },
+          attemptCount: parsedAttemptCount ?? { increment: 1 },
           notes: params.notes?.trim() || undefined,
         },
       });
@@ -198,9 +209,14 @@ export async function updateProposalStatusAction(
           title: proposal.title,
           url: proposal.url,
           platform: proposal.platform,
+          externalId:
+            proposal.externalId ??
+            parseCodeforcesRef(proposal.url)?.externalId ??
+            null,
           perceivedDifficulty: difficulty,
           solved,
           needsReview,
+          attemptCount: parsedAttemptCount ?? 1,
           notes:
             params.notes?.trim() ||
             `Questão proposta por ${proposal.proposer.name}.`,

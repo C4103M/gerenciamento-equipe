@@ -3,6 +3,7 @@
 import type { Difficulty } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import { requireTeamMember } from "@/lib/auth";
+import { parseCodeforcesRef } from "@/lib/codeforces";
 import { NotificationService } from "@/lib/notifications";
 import { detectPlatform } from "@/lib/platform";
 import { prisma } from "@/lib/prisma";
@@ -15,6 +16,9 @@ export interface ProblemLogInput {
   solved: boolean;
   needsReview?: boolean;
   notes?: string;
+  attemptCount?: number;
+  externalId?: string | null;
+  externalRating?: number | null;
 }
 
 function normalizeUrl(raw: string): string {
@@ -24,6 +28,25 @@ function normalizeUrl(raw: string): string {
   return `https://${trimmed}`;
 }
 
+function resolveProblemReference(
+  rawUrl: string,
+  fallbackExternalId?: string | null
+): { url: string; externalId: string | null } {
+  const cfRef = parseCodeforcesRef(rawUrl);
+  if (cfRef) {
+    return { url: cfRef.canonicalUrl, externalId: cfRef.externalId };
+  }
+  return {
+    url: normalizeUrl(rawUrl),
+    externalId: fallbackExternalId?.trim() || null,
+  };
+}
+
+function normalizeAttemptCount(value?: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 1;
+  return Math.max(1, Math.floor(value));
+}
+
 export async function createProblemLogAction(input: ProblemLogInput): Promise<{
   error?: string;
   id?: string;
@@ -31,8 +54,17 @@ export async function createProblemLogAction(input: ProblemLogInput): Promise<{
   const user = await requireTeamMember();
 
   const title = input.title.trim();
-  const url = normalizeUrl(input.url);
+  const { url, externalId } = resolveProblemReference(
+    input.url,
+    input.externalId
+  );
   const topicIds = Array.from(new Set(input.topicIds)).filter(Boolean);
+  const attemptCount = normalizeAttemptCount(input.attemptCount);
+  const externalRating =
+    typeof input.externalRating === "number" &&
+    Number.isFinite(input.externalRating)
+      ? Math.round(input.externalRating)
+      : null;
 
   if (title.length < 2) {
     return { error: "Informe o título da questão." };
@@ -54,9 +86,12 @@ export async function createProblemLogAction(input: ProblemLogInput): Promise<{
       title,
       url,
       platform,
+      externalId,
+      externalRating,
       perceivedDifficulty: input.perceivedDifficulty,
       solved: input.solved,
       needsReview,
+      attemptCount,
       notes: input.notes?.trim() || null,
       topics: {
         connect: topicIds.map((id) => ({ id })),
@@ -81,7 +116,13 @@ export async function updateProblemLogAction(
 
   const existing = await prisma.problemLog.findUnique({
     where: { id },
-    select: { userId: true, teamId: true, reviewedAt: true },
+    select: {
+      userId: true,
+      teamId: true,
+      reviewedAt: true,
+      externalId: true,
+      externalRating: true,
+    },
   });
 
   if (!existing || existing.teamId !== user.teamId) {
@@ -92,8 +133,21 @@ export async function updateProblemLogAction(
   }
 
   const title = input.title.trim();
-  const url = normalizeUrl(input.url);
+  const { url, externalId } = resolveProblemReference(
+    input.url,
+    input.externalId
+  );
   const topicIds = Array.from(new Set(input.topicIds)).filter(Boolean);
+  const attemptCount = normalizeAttemptCount(input.attemptCount);
+  const externalRating =
+    input.externalRating !== undefined
+      ? typeof input.externalRating === "number" &&
+        Number.isFinite(input.externalRating)
+        ? Math.round(input.externalRating)
+        : null
+      : externalId && externalId === existing.externalId
+        ? existing.externalRating
+        : null;
 
   if (title.length < 2) {
     return { error: "Informe o título da questão." };
@@ -114,10 +168,13 @@ export async function updateProblemLogAction(
       title,
       url,
       platform,
+      externalId,
+      externalRating,
       perceivedDifficulty: input.perceivedDifficulty,
       solved: input.solved,
       needsReview,
       reviewedAt: input.solved && !needsReview ? existing.reviewedAt : null,
+      attemptCount,
       notes: input.notes?.trim() || null,
       topics: {
         set: topicIds.map((topicId) => ({ id: topicId })),
@@ -135,7 +192,11 @@ export async function updateProblemLogAction(
 
 export async function resolveReviewProblemAction(
   id: string,
-  params: { perceivedDifficulty: Difficulty; notes?: string }
+  params: {
+    perceivedDifficulty: Difficulty;
+    notes?: string;
+    attemptCount?: number;
+  }
 ): Promise<{ error?: string }> {
   const user = await requireTeamMember();
 
@@ -159,13 +220,20 @@ export async function resolveReviewProblemAction(
     return { error: "Você só pode concluir revisões da sua própria lista." };
   }
 
+  const hasExplicitAttemptCount =
+    typeof params.attemptCount === "number" &&
+    Number.isFinite(params.attemptCount) &&
+    params.attemptCount >= 1;
+
   await prisma.problemLog.update({
     where: { id },
     data: {
       solved: true,
       needsReview: false,
       reviewedAt: new Date(),
-      attemptCount: { increment: 1 },
+      attemptCount: hasExplicitAttemptCount
+        ? Math.floor(params.attemptCount!)
+        : { increment: 1 },
       perceivedDifficulty: params.perceivedDifficulty,
       notes: params.notes?.trim() || existing.notes,
     },

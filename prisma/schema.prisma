@@ -67,6 +67,7 @@ model User {
   team               Team?               @relation(fields: [teamId], references: [id], onDelete: SetNull)
   cfHandle           String?
   lcHandle           String?
+  cfLastSyncedAt     DateTime?
   avatarColor        String              @default("#6366f1")
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
@@ -115,6 +116,8 @@ model ProblemLog {
   title               String
   url                 String
   platform            Platform          @default(OUTRO)
+  externalId          String?
+  externalRating      Int?
   perceivedDifficulty Difficulty        @default(MEDIO)
   solved              Boolean           @default(true)
   notes               String?           @db.Text
@@ -130,6 +133,8 @@ model ProblemLog {
   @@index([teamId])
   @@index([userId])
   @@index([needsReview])
+  @@index([teamId, userId, externalId])
+  @@index([teamId, createdAt])
 }
 
 model ProposedProblem {
@@ -143,6 +148,7 @@ model ProposedProblem {
   title               String
   url                 String
   platform            Platform       @default(OUTRO)
+  externalId          String?
   suggestedDifficulty Difficulty?
   message             String?        @db.Text
   status              ProposalStatus @default(PENDENTE)
@@ -157,6 +163,7 @@ model ProposedProblem {
 
   @@index([teamId])
   @@index([assigneeId, status])
+  @@index([assigneeId, externalId, status])
   @@index([proposerId])
 }
 

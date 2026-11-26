@@ -18,18 +18,30 @@ import {
   Users,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
-import { resolveReviewProblemAction } from "@/actions/problems";
+import {
+  getProblemSolutionCodeAction,
+  resolveReviewProblemAction,
+} from "@/actions/problems";
 import {
   DifficultyBadge,
   MemberAvatar,
   PlatformBadge,
   TopicBadge,
 } from "@/components/Badges";
+import { SolutionFieldsInput } from "@/components/SolutionFieldsInput";
+import { SolutionLinks } from "@/components/SolutionViewerModal";
+import { parseCodeforcesRef } from "@/lib/codeforces";
 import { DIFFICULTY_META } from "@/lib/platform";
 import { cn, formatRelativeDate } from "@/lib/utils";
-import type { MemberSummary, ProblemLogItem, TopicItem } from "@/types";
+import type {
+  MemberSummary,
+  ProblemLogItem,
+  SolutionAttachMode,
+  TopicItem,
+} from "@/types";
 
 export interface ReviewProblemItem extends ProblemLogItem {
   fromProposalProposerName?: string | null;
@@ -428,8 +440,14 @@ export function RevisaoClient({
               return (
                 <article
                   key={item.id}
-                  className="flex flex-col justify-between gap-4 rounded-2xl border border-zinc-800/90 bg-zinc-900/60 p-5 transition-colors hover:border-zinc-700/90"
+                  className="group relative flex flex-col justify-between gap-4 rounded-2xl border border-zinc-800/90 bg-zinc-900/60 p-5 transition-colors hover:border-indigo-500/50 hover:bg-zinc-900/90"
                 >
+                  <Link
+                    href={`/questoes/${item.id}`}
+                    aria-label={`Abrir overview de ${item.title}`}
+                    className="absolute inset-0 z-10 rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                  />
+
                   <div className="space-y-3">
                     {/* Top metadata row */}
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -467,18 +485,19 @@ export function RevisaoClient({
                     </div>
 
                     {/* Title + Link */}
-                    <div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="min-w-0 text-base font-semibold text-zinc-100 transition-colors group-hover:text-indigo-300">
+                        {item.title}
+                      </span>
                       <a
                         href={item.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="group inline-flex items-center gap-2 text-base font-semibold text-zinc-100 transition-colors hover:text-indigo-300"
+                        title="Abrir enunciado na plataforma"
+                        aria-label={`Abrir enunciado de ${item.title}`}
+                        className="relative z-20 inline-flex shrink-0 items-center rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-indigo-400"
                       >
-                        <span>{item.title}</span>
-                        <ExternalLink
-                          className="h-4 w-4 shrink-0 text-zinc-500 transition-colors group-hover:text-indigo-400"
-                          aria-hidden="true"
-                        />
+                        <ExternalLink className="h-4 w-4" aria-hidden="true" />
                       </a>
                     </div>
 
@@ -500,11 +519,25 @@ export function RevisaoClient({
                         <span className="whitespace-pre-wrap">{item.notes}</span>
                       </div>
                     ) : null}
+
+                    {item.solved && (item.solutionUrl || item.hasSolutionCode) ? (
+                      <div className="relative z-20 w-fit">
+                        <SolutionLinks
+                          problemLogId={item.id}
+                          title={item.title}
+                          problemUrl={item.url}
+                          platform={item.platform}
+                          author={item.user}
+                          solutionUrl={item.solutionUrl}
+                          hasSolutionCode={item.hasSolutionCode}
+                        />
+                      </div>
+                    ) : null}
                   </div>
 
                   {/* Action footer */}
                   {isOwner ? (
-                    <div className="flex items-center justify-end border-t border-zinc-800/70 pt-3">
+                    <div className="relative z-20 flex items-center justify-end border-t border-zinc-800/70 pt-3">
                       <button
                         type="button"
                         onClick={() => setResolvingProblem(item)}
@@ -593,6 +626,20 @@ function ResolveReviewModal({
     Math.max(1, problem.attemptCount + 1)
   );
   const [notes, setNotes] = useState(problem.notes ?? "");
+  const [solutionUrl, setSolutionUrl] = useState(problem.solutionUrl ?? "");
+  const [solutionCode, setSolutionCode] = useState("");
+  const [solutionMode, setSolutionMode] = useState<SolutionAttachMode>(() => {
+    if (problem.hasSolutionCode) return "code";
+    if (problem.solutionUrl) return "link";
+    return parseCodeforcesRef(problem.url) ? "link" : "code";
+  });
+  const [dismissedAutoLink, setDismissedAutoLink] = useState(false);
+  const [isLoadingSolutionCode, setIsLoadingSolutionCode] = useState(
+    Boolean(problem.hasSolutionCode)
+  );
+  const [solutionCodeLoaded, setSolutionCodeLoaded] = useState(
+    !problem.hasSolutionCode
+  );
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -606,6 +653,27 @@ function ResolveReviewModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isSubmitting, onClose]);
 
+  useEffect(() => {
+    if (!problem.hasSolutionCode) return;
+
+    let cancelled = false;
+    void getProblemSolutionCodeAction(problem.id)
+      .then((res) => {
+        if (cancelled) return;
+        setSolutionCode(res.solutionCode ?? "");
+        setSolutionCodeLoaded(true);
+        setIsLoadingSolutionCode(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setIsLoadingSolutionCode(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [problem.id, problem.hasSolutionCode]);
+
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
@@ -616,6 +684,15 @@ function ResolveReviewModal({
         perceivedDifficulty,
         notes,
         attemptCount: Math.max(1, Math.floor(attemptCount || 1)),
+        solutionMode,
+        allowAutoSolutionLink: !dismissedAutoLink,
+        solutionUrl: solutionMode === "link" ? solutionUrl || null : null,
+        solutionCode:
+          solutionMode === "code"
+            ? solutionCodeLoaded
+              ? solutionCode
+              : undefined
+            : null,
       });
 
       if (result.error) {
@@ -642,7 +719,7 @@ function ResolveReviewModal({
       }}
     >
       <div
-        className="w-full max-w-lg overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-100 shadow-2xl"
+        className="flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-100 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-zinc-800 px-6 py-4">
@@ -666,110 +743,130 @@ function ResolveReviewModal({
           </button>
         </div>
 
-        <form onSubmit={(e) => void handleSubmit(e)} className="space-y-5 p-6">
-          {error ? (
-            <div
-              role="alert"
-              className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3.5 py-2.5 text-sm text-rose-300"
-            >
-              {error}
-            </div>
-          ) : null}
-
-          <div className="space-y-2">
-            <span className="block text-sm font-medium text-zinc-200">
-              Dificuldade final percebida
-            </span>
-            <div
-              className="grid grid-cols-2 gap-2 sm:grid-cols-4"
-              role="radiogroup"
-              aria-label="Dificuldade final percebida"
-            >
-              {DIFFICULTY_OPTIONS.map((diff) => {
-                const meta = DIFFICULTY_META[diff];
-                const active = perceivedDifficulty === diff;
-                return (
-                  <button
-                    key={diff}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    onClick={() => setPerceivedDifficulty(diff)}
-                    className={cn(
-                      "rounded-lg border px-3 py-2 text-xs font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
-                      active
-                        ? cn(meta.className, "ring-1 ring-current/40")
-                        : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-                    )}
-                  >
-                    {meta.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <label
-              htmlFor="review-attempt-count"
-              className="block text-sm font-medium text-zinc-200"
-            >
-              Número de tentativas
-            </label>
-            <div className="flex w-40 items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1">
-              <button
-                type="button"
-                onClick={() => setAttemptCount((prev) => Math.max(1, prev - 1))}
-                disabled={attemptCount <= 1 || isSubmitting}
-                aria-label="Diminuir número de tentativas"
-                className="inline-flex h-7 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+        <form
+          onSubmit={(e) => void handleSubmit(e)}
+          className="flex flex-1 flex-col overflow-hidden"
+        >
+          <div className="flex-1 space-y-5 overflow-y-auto p-6">
+            {error ? (
+              <div
+                role="alert"
+                className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3.5 py-2.5 text-sm text-rose-300"
               >
-                <Minus className="h-3.5 w-3.5" />
-              </button>
-              <input
-                id="review-attempt-count"
-                type="number"
-                min={1}
-                max={999}
-                value={attemptCount}
-                onChange={(e) => {
-                  const val = Number.parseInt(e.target.value, 10);
-                  setAttemptCount(Number.isFinite(val) && val >= 1 ? val : 1);
-                }}
-                className="w-full bg-transparent text-center font-mono text-sm font-semibold text-zinc-100 focus:outline-none"
+                {error}
+              </div>
+            ) : null}
+
+            <div className="space-y-2">
+              <span className="block text-sm font-medium text-zinc-200">
+                Dificuldade final percebida
+              </span>
+              <div
+                className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+                role="radiogroup"
+                aria-label="Dificuldade final percebida"
+              >
+                {DIFFICULTY_OPTIONS.map((diff) => {
+                  const meta = DIFFICULTY_META[diff];
+                  const active = perceivedDifficulty === diff;
+                  return (
+                    <button
+                      key={diff}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => setPerceivedDifficulty(diff)}
+                      className={cn(
+                        "rounded-lg border px-3 py-2 text-xs font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
+                        active
+                          ? cn(meta.className, "ring-1 ring-current/40")
+                          : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                      )}
+                    >
+                      {meta.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                htmlFor="review-attempt-count"
+                className="block text-sm font-medium text-zinc-200"
+              >
+                Número de tentativas
+              </label>
+              <div className="flex w-40 items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1">
+                <button
+                  type="button"
+                  onClick={() => setAttemptCount((prev) => Math.max(1, prev - 1))}
+                  disabled={attemptCount <= 1 || isSubmitting}
+                  aria-label="Diminuir número de tentativas"
+                  className="inline-flex h-7 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </button>
+                <input
+                  id="review-attempt-count"
+                  type="number"
+                  min={1}
+                  max={999}
+                  value={attemptCount}
+                  onChange={(e) => {
+                    const val = Number.parseInt(e.target.value, 10);
+                    setAttemptCount(Number.isFinite(val) && val >= 1 ? val : 1);
+                  }}
+                  className="w-full bg-transparent text-center font-mono text-sm font-semibold text-zinc-100 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    setAttemptCount((prev) => Math.min(999, prev + 1))
+                  }
+                  disabled={isSubmitting}
+                  aria-label="Aumentar número de tentativas"
+                  className="inline-flex h-7 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                htmlFor="review-lesson-notes"
+                className="block text-sm font-medium text-zinc-200"
+              >
+                O que você aprendeu / observações finais
+              </label>
+              <textarea
+                id="review-lesson-notes"
+                rows={4}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Registre o insight principal, erro que evitou ou complexidade final..."
+                className="w-full resize-y rounded-lg border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
               />
-              <button
-                type="button"
-                onClick={() =>
-                  setAttemptCount((prev) => Math.min(999, prev + 1))
-                }
-                disabled={isSubmitting}
-                aria-label="Aumentar número de tentativas"
-                className="inline-flex h-7 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
             </div>
-          </div>
 
-          <div className="space-y-1.5">
-            <label
-              htmlFor="review-lesson-notes"
-              className="block text-sm font-medium text-zinc-200"
-            >
-              O que você aprendeu / observações finais
-            </label>
-            <textarea
-              id="review-lesson-notes"
-              rows={4}
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Registre o insight principal, erro que evitou ou complexidade final..."
-              className="w-full resize-y rounded-lg border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
+            <SolutionFieldsInput
+              mode={solutionMode}
+              onModeChange={setSolutionMode}
+              problemUrl={problem.url}
+              solutionUrl={solutionUrl}
+              onSolutionUrlChange={setSolutionUrl}
+              dismissedAutoLink={dismissedAutoLink}
+              onDismissAutoLinkChange={setDismissedAutoLink}
+              solutionCode={solutionCode}
+              onSolutionCodeChange={setSolutionCode}
+              disabled={isSubmitting}
+              isLoadingCode={isLoadingSolutionCode}
+              codeInputId="review-solution-code"
             />
           </div>
 
-          <div className="flex items-center justify-end gap-2.5 border-t border-zinc-800 pt-4">
+          <div className="flex items-center justify-end gap-2.5 border-t border-zinc-800 bg-zinc-900/95 px-6 py-4">
             <button
               type="button"
               onClick={onClose}

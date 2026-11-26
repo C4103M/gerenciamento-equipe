@@ -8,6 +8,7 @@ import {
   parsePeriodSearchParams,
 } from "@/lib/period";
 import { prisma } from "@/lib/prisma";
+import { getLogIdsWithSolutionCode } from "@/lib/solutions";
 import type { MemberSummary, ProblemLogItem, TopicItem } from "@/types";
 
 export const metadata: Metadata = {
@@ -48,6 +49,30 @@ const TOPIC_SELECT = {
   name: true,
   slug: true,
   color: true,
+} as const;
+
+const PROBLEM_LOG_SELECT = {
+  id: true,
+  userId: true,
+  title: true,
+  url: true,
+  platform: true,
+  externalId: true,
+  externalRating: true,
+  perceivedDifficulty: true,
+  solved: true,
+  notes: true,
+  solutionUrl: true,
+  needsReview: true,
+  reviewedAt: true,
+  attemptCount: true,
+  createdAt: true,
+  updatedAt: true,
+  user: { select: MEMBER_SELECT },
+  topics: {
+    select: TOPIC_SELECT,
+    orderBy: { name: "asc" as const },
+  },
 } as const;
 
 type StatusFilter = "ALL" | "SOLVED" | "REVIEW";
@@ -149,13 +174,7 @@ export default async function QuestoesPage({
     await Promise.all([
       prisma.problemLog.findMany({
         where,
-        include: {
-          user: { select: MEMBER_SELECT },
-          topics: {
-            select: TOPIC_SELECT,
-            orderBy: { name: "asc" },
-          },
-        },
+        select: PROBLEM_LOG_SELECT,
         orderBy: { createdAt: "desc" },
         take: PAGE_SIZE,
         skip: (requestedPage - 1) * PAGE_SIZE,
@@ -175,18 +194,16 @@ export default async function QuestoesPage({
     requestedPage > totalPages && filteredCount > 0
       ? await prisma.problemLog.findMany({
           where,
-          include: {
-            user: { select: MEMBER_SELECT },
-            topics: {
-              select: TOPIC_SELECT,
-              orderBy: { name: "asc" },
-            },
-          },
+          select: PROBLEM_LOG_SELECT,
           orderBy: { createdAt: "desc" },
           take: PAGE_SIZE,
           skip: (currentPage - 1) * PAGE_SIZE,
         })
       : initialLogsRaw;
+
+  const idsWithCode = await getLogIdsWithSolutionCode(
+    problemLogsRaw.filter((log) => log.solved).map((log) => log.id)
+  );
 
   const initialProblems: ProblemLogItem[] = problemLogsRaw.map((log) => ({
     id: log.id,
@@ -199,6 +216,8 @@ export default async function QuestoesPage({
     perceivedDifficulty: log.perceivedDifficulty,
     solved: log.solved,
     notes: log.notes,
+    solutionUrl: log.solutionUrl,
+    hasSolutionCode: idsWithCode.has(log.id),
     needsReview: log.needsReview,
     reviewedAt: log.reviewedAt ? log.reviewedAt.toISOString() : null,
     attemptCount: log.attemptCount,

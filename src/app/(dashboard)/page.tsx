@@ -23,6 +23,7 @@ import {
   DashboardMemberGrid,
   type DashboardMemberTopicStat,
 } from "@/components/DashboardMemberGrid";
+import { SolutionLinks } from "@/components/SolutionViewerModal";
 import { requireTeamMember } from "@/lib/auth";
 import { getCachedTeamMembers, getCachedTopics } from "@/lib/cache";
 import { buildDashboardHref, buildQuestoesHref } from "@/lib/dashboard";
@@ -32,10 +33,22 @@ import {
   parsePeriodSearchParams,
 } from "@/lib/period";
 import { prisma } from "@/lib/prisma";
+import { getLogIdsWithSolutionCode } from "@/lib/solutions";
 import { formatRelativeDate } from "@/lib/utils";
 import type { MemberSummary, TopicItem } from "@/types";
 
-const LATEST_LOG_INCLUDE = {
+const LATEST_LOG_SELECT = {
+  id: true,
+  title: true,
+  url: true,
+  platform: true,
+  externalRating: true,
+  perceivedDifficulty: true,
+  solved: true,
+  needsReview: true,
+  attemptCount: true,
+  solutionUrl: true,
+  createdAt: true,
   user: {
     select: {
       id: true,
@@ -106,7 +119,7 @@ export default async function DashboardPage({
       },
       orderBy: { createdAt: "desc" },
       take: 8,
-      include: LATEST_LOG_INCLUDE,
+      select: LATEST_LOG_SELECT,
     }),
     prisma.proposedProblem.count({
       where: {
@@ -128,7 +141,7 @@ export default async function DashboardPage({
             where: { teamId: currentUser.teamId, ...periodWhere },
             orderBy: { createdAt: "desc" },
             take: 8,
-            include: LATEST_LOG_INCLUDE,
+            select: LATEST_LOG_SELECT,
           }),
           prisma.proposedProblem.count({
             where: {
@@ -138,6 +151,10 @@ export default async function DashboardPage({
           }),
         ])
       : [initialLatestLogs, initialOpenProposalsCount];
+
+  const latestLogIdsWithCode = await getLogIdsWithSolutionCode(
+    latestLogs.filter((log) => log.solved).map((log) => log.id)
+  );
 
   const topicsById = new Map<string, TopicItem>(
     serializedTopics.map((topic) => [topic.id, topic])
@@ -681,22 +698,34 @@ export default async function DashboardPage({
               {latestLogs.map((log) => (
                 <article
                   key={log.id}
-                  className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3.5 transition-colors hover:border-zinc-700"
+                  className="group relative rounded-xl border border-zinc-800 bg-zinc-950/60 p-3.5 transition-colors hover:border-indigo-500/50 hover:bg-zinc-900/70"
                 >
+                  <Link
+                    href={`/questoes/${log.id}`}
+                    aria-label={`Abrir overview de ${log.title}`}
+                    className="absolute inset-0 z-10 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                  />
+
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 space-y-2">
-                      <a
-                        href={log.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="group inline-flex max-w-full items-center gap-1.5 text-sm font-semibold text-zinc-100 transition-colors hover:text-indigo-400"
-                      >
-                        <span className="truncate">{log.title}</span>
-                        <ExternalLink
-                          className="h-3.5 w-3.5 shrink-0 text-zinc-500 transition-colors group-hover:text-indigo-400"
-                          aria-hidden="true"
-                        />
-                      </a>
+                      <div className="flex items-center gap-1.5">
+                        <span className="min-w-0 truncate text-sm font-semibold text-zinc-100 transition-colors group-hover:text-indigo-300">
+                          {log.title}
+                        </span>
+                        <a
+                          href={log.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="Abrir enunciado na plataforma"
+                          aria-label={`Abrir enunciado de ${log.title}`}
+                          className="relative z-20 inline-flex shrink-0 items-center rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-indigo-400"
+                        >
+                          <ExternalLink
+                            className="h-3.5 w-3.5"
+                            aria-hidden="true"
+                          />
+                        </a>
+                      </div>
 
                       <div className="flex flex-wrap items-center gap-1.5">
                         <PlatformBadge platform={log.platform} />
@@ -728,6 +757,22 @@ export default async function DashboardPage({
                           {log.topics.map((topic) => (
                             <TopicBadge key={topic.id} topic={topic} />
                           ))}
+                        </div>
+                      ) : null}
+
+                      {log.solved &&
+                      (log.solutionUrl || latestLogIdsWithCode.has(log.id)) ? (
+                        <div className="relative z-20 w-fit">
+                          <SolutionLinks
+                            size="xs"
+                            problemLogId={log.id}
+                            title={log.title}
+                            problemUrl={log.url}
+                            platform={log.platform}
+                            author={log.user}
+                            solutionUrl={log.solutionUrl}
+                            hasSolutionCode={latestLogIdsWithCode.has(log.id)}
+                          />
                         </div>
                       ) : null}
                     </div>

@@ -17,21 +17,40 @@ import { lookupCodeforcesProblemAction } from "@/actions/codeforces";
 import { lookupLeetCodeProblemAction } from "@/actions/leetcode";
 import {
   createProblemLogAction,
+  getProblemSolutionCodeAction,
   updateProblemLogAction,
 } from "@/actions/problems";
 import { PlatformBadge } from "@/components/Badges";
+import {
+  type SolutionAutoLookupHint,
+  SolutionFieldsInput,
+} from "@/components/SolutionFieldsInput";
 import { TopicSelector } from "@/components/TopicSelector";
 import { parseCodeforcesRef } from "@/lib/codeforces";
 import { parseLeetCodeRef } from "@/lib/leetcode";
 import { DIFFICULTY_META, detectPlatform } from "@/lib/platform";
 import { cn } from "@/lib/utils";
-import type { ProblemLogItem, TopicItem } from "@/types";
+import type {
+  ProblemLogItem,
+  SolutionAttachMode,
+  TopicItem,
+} from "@/types";
+
+export interface ProblemFormPrefill {
+  title: string;
+  url: string;
+  externalId?: string | null;
+  externalRating?: number | null;
+  topicIds: string[];
+  perceivedDifficulty?: Difficulty;
+}
 
 export interface ProblemFormModalProps {
   open: boolean;
   onClose: () => void;
   topics: TopicItem[];
   initialProblem?: ProblemLogItem | null;
+  prefill?: ProblemFormPrefill | null;
 }
 
 const DIFFICULTY_OPTIONS: Difficulty[] = [
@@ -47,15 +66,20 @@ export function ProblemFormModal({
   onClose,
   topics,
   initialProblem = null,
+  prefill = null,
 }: ProblemFormModalProps) {
   if (!open) return null;
 
   return (
     <ProblemFormContent
-      key={initialProblem?.id ?? "new-problem"}
+      key={
+        initialProblem?.id ??
+        (prefill ? `prefill-${prefill.url}` : "new-problem")
+      }
       onClose={onClose}
       topics={topics}
       initialProblem={initialProblem}
+      prefill={prefill}
     />
   );
 }
@@ -64,23 +88,27 @@ function ProblemFormContent({
   onClose,
   topics,
   initialProblem,
+  prefill,
 }: Omit<ProblemFormModalProps, "open">) {
   const router = useRouter();
   const isEditing = Boolean(initialProblem);
+  const seed = initialProblem ?? prefill;
 
-  const [title, setTitle] = useState(initialProblem?.title ?? "");
-  const [url, setUrl] = useState(initialProblem?.url ?? "");
+  const [title, setTitle] = useState(seed?.title ?? "");
+  const [url, setUrl] = useState(seed?.url ?? "");
   const [externalId, setExternalId] = useState<string | null>(
-    initialProblem?.externalId ?? null
+    seed?.externalId ?? null
   );
   const [externalRating, setExternalRating] = useState<number | null>(
-    initialProblem?.externalRating ?? null
+    seed?.externalRating ?? null
   );
   const [topicIds, setTopicIds] = useState<string[]>(
-    initialProblem?.topics.map((t) => t.id) ?? []
+    initialProblem
+      ? initialProblem.topics.map((t) => t.id)
+      : (prefill?.topicIds ?? [])
   );
   const [perceivedDifficulty, setPerceivedDifficulty] = useState<Difficulty>(
-    initialProblem?.perceivedDifficulty ?? "MEDIO"
+    seed?.perceivedDifficulty ?? "MEDIO"
   );
   const [attemptCount, setAttemptCount] = useState<number>(
     initialProblem?.attemptCount ?? 1
@@ -90,6 +118,26 @@ function ProblemFormContent({
     initialProblem?.needsReview ?? false
   );
   const [notes, setNotes] = useState(initialProblem?.notes ?? "");
+  const [solutionUrl, setSolutionUrl] = useState(
+    initialProblem?.solutionUrl ?? ""
+  );
+  const [solutionCode, setSolutionCode] = useState("");
+  const [solutionMode, setSolutionMode] = useState<SolutionAttachMode>(() => {
+    if (initialProblem?.hasSolutionCode) return "code";
+    if (initialProblem?.solutionUrl) return "link";
+    if (seed?.url && !parseCodeforcesRef(seed.url)) return "code";
+    return "link";
+  });
+  const [dismissedAutoLink, setDismissedAutoLink] = useState(false);
+  const [cfLookupHint, setCfLookupHint] =
+    useState<SolutionAutoLookupHint | null>(null);
+  const [isDebouncingLookup, setIsDebouncingLookup] = useState(false);
+  const [isLoadingSolutionCode, setIsLoadingSolutionCode] = useState(
+    Boolean(initialProblem?.hasSolutionCode)
+  );
+  const [solutionCodeLoaded, setSolutionCodeLoaded] = useState(
+    !initialProblem?.hasSolutionCode
+  );
   const [isLookingUp, setIsLookingUp] = useState(false);
   const [lookupPlatform, setLookupPlatform] = useState<
     "CODEFORCES" | "LEETCODE" | null
@@ -103,10 +151,14 @@ function ProblemFormContent({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const userPickedSolutionModeRef = useRef<boolean>(
+    Boolean(initialProblem?.hasSolutionCode || initialProblem?.solutionUrl)
+  );
+
   const lastAutoLookedUpRef = useRef<string | null>(
-    initialProblem
-      ? (parseCodeforcesRef(initialProblem.url)?.externalId ??
-          parseLeetCodeRef(initialProblem.url)?.externalId ??
+    seed
+      ? (parseCodeforcesRef(seed.url)?.externalId ??
+          parseLeetCodeRef(seed.url)?.externalId ??
           null)
       : null
   );
@@ -127,6 +179,27 @@ function ProblemFormContent({
       }
     };
   }, [isSubmitting, onClose]);
+
+  useEffect(() => {
+    if (!initialProblem?.hasSolutionCode) return;
+
+    let cancelled = false;
+    void getProblemSolutionCodeAction(initialProblem.id)
+      .then((res) => {
+        if (cancelled) return;
+        setSolutionCode(res.solutionCode ?? "");
+        setSolutionCodeLoaded(true);
+        setIsLoadingSolutionCode(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setIsLoadingSolutionCode(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialProblem?.id, initialProblem?.hasSolutionCode]);
 
   const trimmedUrl = url.trim();
   const cfRef = trimmedUrl ? parseCodeforcesRef(trimmedUrl) : null;
@@ -152,11 +225,13 @@ function ProblemFormContent({
       : "LEETCODE";
 
     if (!force && lastAutoLookedUpRef.current === targetExternalId) {
+      setIsDebouncingLookup(false);
       return;
     }
 
     lastAutoLookedUpRef.current = targetExternalId;
     const seq = ++lookupSeqRef.current;
+    setIsDebouncingLookup(false);
     setIsLookingUp(true);
     setLookupPlatform(targetPlatform);
     setLookupStatus(null);
@@ -186,6 +261,17 @@ function ProblemFormContent({
         }
         if (data.suggestedDifficulty) {
           setPerceivedDifficulty(data.suggestedDifficulty);
+        }
+        setSolutionUrl(data.userSolutionUrl ?? "");
+        setDismissedAutoLink(false);
+        setCfLookupHint({
+          externalId: data.externalId,
+          cfHandle: data.cfHandle,
+          cfHandleConfigured: data.cfHandleConfigured,
+          error: data.solutionLookupError ?? null,
+        });
+        if (!userPickedSolutionModeRef.current) {
+          setSolutionMode("link");
         }
 
         const ratingPart = data.rating
@@ -221,6 +307,12 @@ function ProblemFormContent({
         }
         if (data.suggestedDifficulty) {
           setPerceivedDifficulty(data.suggestedDifficulty);
+        }
+        setSolutionUrl("");
+        setDismissedAutoLink(false);
+        setCfLookupHint(null);
+        if (!userPickedSolutionModeRef.current) {
+          setSolutionMode("code");
         }
 
         const diffPart = data.lcDifficulty
@@ -262,6 +354,18 @@ function ProblemFormContent({
     if (!parsedExtId) {
       setExternalId(null);
       setExternalRating(null);
+      setIsDebouncingLookup(false);
+      setSolutionUrl("");
+      setCfLookupHint(null);
+      setDismissedAutoLink(false);
+      if (!userPickedSolutionModeRef.current) {
+        const fallbackPlatform = nextValue.trim()
+          ? detectPlatform(nextValue.trim())
+          : null;
+        if (fallbackPlatform && fallbackPlatform !== "CODEFORCES") {
+          setSolutionMode("code");
+        }
+      }
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
@@ -271,10 +375,23 @@ function ProblemFormContent({
     if (parsedExtId !== externalId) {
       setExternalId(parsedExtId);
       setExternalRating(null);
+      setSolutionUrl("");
+      setDismissedAutoLink(false);
+      setCfLookupHint(null);
+    }
+
+    if (!userPickedSolutionModeRef.current) {
+      setSolutionMode(parsedCf ? "link" : "code");
     }
 
     if (isEditing) return;
 
+    if (lastAutoLookedUpRef.current === parsedExtId) {
+      setIsDebouncingLookup(false);
+      return;
+    }
+
+    setIsDebouncingLookup(true);
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
     }
@@ -290,6 +407,7 @@ function ProblemFormContent({
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
+      setIsDebouncingLookup(false);
       void performProblemLookup(pasted, false);
     }
   }
@@ -321,6 +439,16 @@ function ProblemFormContent({
         solved,
         needsReview: solved ? needsReview : true,
         notes,
+        solutionMode,
+        allowAutoSolutionLink: !dismissedAutoLink,
+        solutionUrl:
+          solved && solutionMode === "link" ? solutionUrl || null : null,
+        solutionCode:
+          !solved || solutionMode === "link"
+            ? null
+            : solutionCodeLoaded
+              ? solutionCode
+              : undefined,
         attemptCount: Math.max(1, Math.floor(attemptCount || 1)),
         externalId: cfRef?.externalId ?? lcRef?.externalId ?? externalId,
         externalRating,
@@ -711,6 +839,28 @@ function ProblemFormContent({
                   </span>
                 </label>
               )}
+
+              {solved ? (
+                <SolutionFieldsInput
+                  mode={solutionMode}
+                  onModeChange={(nextMode) => {
+                    userPickedSolutionModeRef.current = true;
+                    setSolutionMode(nextMode);
+                  }}
+                  problemUrl={url}
+                  solutionUrl={solutionUrl}
+                  onSolutionUrlChange={setSolutionUrl}
+                  dismissedAutoLink={dismissedAutoLink}
+                  onDismissAutoLinkChange={setDismissedAutoLink}
+                  solutionCode={solutionCode}
+                  onSolutionCodeChange={setSolutionCode}
+                  disabled={isSubmitting}
+                  isLoadingCode={isLoadingSolutionCode}
+                  deferAutoLookup={isLookingUp || isDebouncingLookup}
+                  externalLookupHint={cfLookupHint}
+                  codeInputId="problem-solution-code"
+                />
+              ) : null}
             </div>
 
             {/* Notes */}

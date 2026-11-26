@@ -122,6 +122,8 @@ model ProblemLog {
   perceivedDifficulty Difficulty        @default(MEDIO)
   solved              Boolean           @default(true)
   notes               String?           @db.Text
+  solutionUrl         String?
+  solutionCode        String?           @db.Text
   needsReview         Boolean           @default(false)
   reviewedAt          DateTime?
   attemptCount        Int               @default(1)

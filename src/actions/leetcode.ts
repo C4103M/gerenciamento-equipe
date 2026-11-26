@@ -23,7 +23,11 @@ import {
 } from "@/lib/leetcode";
 import { NotificationService } from "@/lib/notifications";
 import { prisma } from "@/lib/prisma";
-import { sanitizeHttpUrl } from "@/lib/url";
+import {
+  MAX_SOLUTION_CODE_LENGTH,
+  normalizeOptionalSolutionCode,
+  sanitizeHttpUrl,
+} from "@/lib/url";
 import type { TopicItem } from "@/types";
 
 const MAX_BATCH_ITEMS = 500;
@@ -64,6 +68,8 @@ export interface LeetCodeSyncPreviewItem {
   existingLogId: string | null;
   existingAttemptCount: number | null;
   notes: string;
+  solutionUrl: string | null;
+  solutionCode: string;
   matchingProposals: SyncMatchingProposalInfo[];
 }
 
@@ -374,6 +380,8 @@ export async function previewMemberLeetCodeSyncAction(params: {
           existingLogId: null,
           existingAttemptCount: null,
           notes: "",
+          solutionUrl: null,
+          solutionCode: "",
           matchingProposals,
         });
       } else {
@@ -406,6 +414,8 @@ export async function previewMemberLeetCodeSyncAction(params: {
           existingLogId: null,
           existingAttemptCount: null,
           notes: "",
+          solutionUrl: null,
+          solutionCode: "",
           matchingProposals,
         });
       }
@@ -448,6 +458,8 @@ export async function previewMemberLeetCodeSyncAction(params: {
           existingLogId: existingLog.id,
           existingAttemptCount: existingLog.attemptCount,
           notes: existingLog.notes ?? "",
+          solutionUrl: null,
+          solutionCode: "",
           matchingProposals,
         });
         continue;
@@ -475,6 +487,8 @@ export async function previewMemberLeetCodeSyncAction(params: {
           existingLogId: existingLog.id,
           existingAttemptCount: existingLog.attemptCount,
           notes: existingLog.notes ?? "",
+          solutionUrl: null,
+          solutionCode: "",
           matchingProposals,
         });
         continue;
@@ -502,6 +516,8 @@ export async function previewMemberLeetCodeSyncAction(params: {
           existingLogId: existingLog.id,
           existingAttemptCount: existingLog.attemptCount,
           notes: existingLog.notes ?? "",
+          solutionUrl: null,
+          solutionCode: "",
           matchingProposals: [],
         });
         continue;
@@ -540,6 +556,8 @@ export async function previewMemberLeetCodeSyncAction(params: {
         existingLogId: existingLog.id,
         existingAttemptCount: existingLog.attemptCount,
         notes: existingLog.notes ?? "",
+        solutionUrl: null,
+        solutionCode: "",
         matchingProposals,
       });
       continue;
@@ -585,6 +603,8 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
       safeUrl: string;
       cleanTitle: string;
       cleanNotes: string | null;
+      cleanSolutionUrl: string | null;
+      cleanSolutionCode: string | null;
     }
   > = [];
 
@@ -607,11 +627,26 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
         error: `Observação do item "${cleanTitle}" excede o limite de ${MAX_NOTES_LENGTH} caracteres.`,
       };
     }
+
+    const cleanSolutionUrl: string | null = null;
+    let cleanSolutionCode: string | null = null;
+    if (item.solved) {
+      const codeCheck = normalizeOptionalSolutionCode(item.solutionCode);
+      if (codeCheck.tooLong) {
+        return {
+          error: `Código da solução do item "${cleanTitle}" excede o limite de ${MAX_SOLUTION_CODE_LENGTH} caracteres.`,
+        };
+      }
+      cleanSolutionCode = codeCheck.value;
+    }
+
     sanitizedItems.push({
       ...item,
       safeUrl,
       cleanTitle,
       cleanNotes,
+      cleanSolutionUrl,
+      cleanSolutionCode,
     });
   }
 
@@ -633,6 +668,7 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
     createdAttempted: 0,
     upsolvedReview: 0,
     updatedAttempts: 0,
+    updatedSolutionLinks: 0,
     proposalsUpdated: 0,
     skippedDuplicates: 0,
   };
@@ -655,6 +691,7 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
           attemptCount: true,
           solved: true,
           notes: true,
+          solutionUrl: true,
         },
       }),
       prisma.proposedProblem.findMany({
@@ -838,6 +875,8 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
                 needsReview: !isSolved,
                 attemptCount,
                 notes: trimmedNotes,
+                solutionUrl: isSolved ? item.cleanSolutionUrl : null,
+                solutionCode: isSolved ? item.cleanSolutionCode : null,
                 createdAt: safeActivityDate,
                 topics: {
                   connect: cleanTopics.map((id) => ({ id })),
@@ -854,6 +893,7 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
               attemptCount,
               solved: isSolved,
               notes: trimmedNotes,
+              solutionUrl: isSolved ? item.cleanSolutionUrl : null,
             });
 
             if (isSolved) {
@@ -890,6 +930,10 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
                 attemptCount: Math.max(existing.attemptCount, attemptCount),
                 perceivedDifficulty: item.perceivedDifficulty,
                 notes: trimmedNotes || existing.notes,
+                solutionUrl: item.cleanSolutionUrl ?? existing.solutionUrl,
+                ...(item.cleanSolutionCode !== null
+                  ? { solutionCode: item.cleanSolutionCode }
+                  : {}),
                 externalId: existing.externalId ?? item.externalId,
                 ...(cleanTopics.length > 0
                   ? {
@@ -926,11 +970,22 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
               return;
             }
 
+            const shouldBackfillSolutionUrl =
+              existing.solved &&
+              !existing.solutionUrl &&
+              Boolean(item.cleanSolutionUrl);
+
             await prisma.problemLog.update({
               where: { id: existing.id },
               data: {
                 attemptCount: Math.max(existing.attemptCount, attemptCount),
                 externalId: existing.externalId ?? item.externalId,
+                ...(shouldBackfillSolutionUrl
+                  ? { solutionUrl: item.cleanSolutionUrl }
+                  : {}),
+                ...(existing.solved && item.cleanSolutionCode !== null
+                  ? { solutionCode: item.cleanSolutionCode }
+                  : {}),
               },
             });
 
@@ -940,6 +995,38 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
               existing.id,
               existing.solved ? "FEITO" : "TENTOU"
             );
+            return;
+          }
+
+          if (item.action === "UPDATE_SOLUTION_LINK") {
+            const existing =
+              (item.existingLogId
+                ? existingById.get(item.existingLogId)
+                : undefined) ?? existingByExternalId.get(item.externalId);
+
+            if (
+              !existing ||
+              !existing.solved ||
+              (!item.cleanSolutionUrl && !item.cleanSolutionCode)
+            ) {
+              summary.skippedDuplicates += 1;
+              return;
+            }
+
+            await prisma.problemLog.update({
+              where: { id: existing.id },
+              data: {
+                ...(item.cleanSolutionUrl
+                  ? { solutionUrl: item.cleanSolutionUrl }
+                  : {}),
+                ...(item.cleanSolutionCode !== null
+                  ? { solutionCode: item.cleanSolutionCode }
+                  : {}),
+                externalId: existing.externalId ?? item.externalId,
+              },
+            });
+
+            summary.updatedSolutionLinks += 1;
             return;
           }
 
@@ -954,12 +1041,30 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
               return;
             }
 
-            if (attemptCount > existing.attemptCount || !existing.externalId) {
+            const shouldBackfillSolutionUrl =
+              existing.solved &&
+              !existing.solutionUrl &&
+              Boolean(item.cleanSolutionUrl);
+            const shouldSetSolutionCode =
+              existing.solved && item.cleanSolutionCode !== null;
+
+            if (
+              attemptCount > existing.attemptCount ||
+              !existing.externalId ||
+              shouldBackfillSolutionUrl ||
+              shouldSetSolutionCode
+            ) {
               await prisma.problemLog.update({
                 where: { id: existing.id },
                 data: {
                   attemptCount: Math.max(existing.attemptCount, attemptCount),
                   externalId: existing.externalId ?? item.externalId,
+                  ...(shouldBackfillSolutionUrl
+                    ? { solutionUrl: item.cleanSolutionUrl }
+                    : {}),
+                  ...(shouldSetSolutionCode
+                    ? { solutionCode: item.cleanSolutionCode }
+                    : {}),
                 },
               });
             }
@@ -992,6 +1097,7 @@ export async function commitMemberLeetCodeSyncBatchAction(params: {
 
     revalidatePath("/");
     revalidatePath("/questoes");
+    revalidatePath("/questoes/[id]", "page");
     revalidatePath("/revisao");
     revalidatePath("/propostos");
     revalidatePath("/notificacoes");

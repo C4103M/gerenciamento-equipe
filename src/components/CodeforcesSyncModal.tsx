@@ -51,6 +51,7 @@ type TriageTypeFilter =
   | "NEW_SOLVED"
   | "NEW_ATTEMPTED"
   | "UPSOLVE_REVIEW"
+  | "UPDATE_SOLUTION_LINK"
   | "PROPOSALS";
 
 interface TriageItemState extends SyncPreviewItem {
@@ -91,6 +92,7 @@ function emptyBatchSummary(): BatchCommitSummary {
     createdAttempted: 0,
     upsolvedReview: 0,
     updatedAttempts: 0,
+    updatedSolutionLinks: 0,
     proposalsUpdated: 0,
     skippedDuplicates: 0,
   };
@@ -105,6 +107,8 @@ function mergeBatchSummary(
     createdAttempted: target.createdAttempted + delta.createdAttempted,
     upsolvedReview: target.upsolvedReview + delta.upsolvedReview,
     updatedAttempts: target.updatedAttempts + delta.updatedAttempts,
+    updatedSolutionLinks:
+      target.updatedSolutionLinks + delta.updatedSolutionLinks,
     proposalsUpdated: target.proposalsUpdated + delta.proposalsUpdated,
     skippedDuplicates: target.skippedDuplicates + delta.skippedDuplicates,
   };
@@ -125,6 +129,7 @@ function toCommitItem(item: TriageItemState | SyncPreviewItem): SyncCommitItem {
     activityAt: item.activityAt,
     existingLogId: item.existingLogId,
     notes: item.notes,
+    solutionUrl: item.solved ? item.solutionUrl : null,
   };
 }
 
@@ -147,6 +152,10 @@ const ACTION_BADGE_META: Record<
   UPDATE_ATTEMPTS: {
     label: "Atualiza Tentativas",
     className: "border-zinc-700 bg-zinc-800/90 text-zinc-200",
+  },
+  UPDATE_SOLUTION_LINK: {
+    label: "Link Resolução",
+    className: "border-teal-500/30 bg-teal-500/15 text-teal-300",
   },
   LINK_PROPOSAL: {
     label: "Vincula Proposta",
@@ -523,11 +532,13 @@ function CodeforcesSyncContent({
     let newSolved = 0;
     let newAttempted = 0;
     let upsolve = 0;
+    let solutionLinks = 0;
     let proposals = 0;
     for (const item of triageItems) {
       if (item.action === "NEW_SOLVED") newSolved += 1;
       if (item.action === "NEW_ATTEMPTED") newAttempted += 1;
       if (item.action === "UPSOLVE_REVIEW") upsolve += 1;
+      if (item.action === "UPDATE_SOLUTION_LINK") solutionLinks += 1;
       proposals += item.matchingProposals.length;
     }
 
@@ -544,6 +555,7 @@ function CodeforcesSyncContent({
       newSolved,
       newAttempted,
       upsolve,
+      solutionLinks,
       proposals,
       alreadySynced,
       graceSkipped,
@@ -562,6 +574,12 @@ function CodeforcesSyncContent({
         return false;
       }
       if (typeFilter === "UPSOLVE_REVIEW" && item.action !== "UPSOLVE_REVIEW") {
+        return false;
+      }
+      if (
+        typeFilter === "UPDATE_SOLUTION_LINK" &&
+        item.action !== "UPDATE_SOLUTION_LINK"
+      ) {
         return false;
       }
       if (
@@ -895,6 +913,12 @@ function CodeforcesSyncContent({
                 <span className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-xs text-sky-300">
                   <strong>{triageStats.upsolve}</strong> upsolvings
                 </span>
+                {triageStats.solutionLinks > 0 ? (
+                  <span className="rounded-lg border border-teal-500/30 bg-teal-500/10 px-2.5 py-1 text-xs text-teal-300">
+                    <strong>{triageStats.solutionLinks}</strong> links de
+                    resolução
+                  </span>
+                ) : null}
                 <span className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-xs text-indigo-300">
                   <strong>{triageStats.proposals}</strong> baixas em propostas
                 </span>
@@ -957,6 +981,9 @@ function CodeforcesSyncContent({
                         <option value="NEW_ATTEMPTED">Para Revisão</option>
                         <option value="UPSOLVE_REVIEW">
                           Upsolving de Revisão
+                        </option>
+                        <option value="UPDATE_SOLUTION_LINK">
+                          Link de Resolução
                         </option>
                         <option value="PROPOSALS">Com Proposta</option>
                       </select>
@@ -1046,6 +1073,21 @@ function CodeforcesSyncContent({
                                     <span className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[11px] text-sky-300">
                                       CF {item.rating}
                                     </span>
+                                  ) : null}
+
+                                  {item.solved && item.solutionUrl ? (
+                                    <a
+                                      href={item.solutionUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20"
+                                    >
+                                      <span>Submissão CF</span>
+                                      <ExternalLink
+                                        className="h-3 w-3"
+                                        aria-hidden="true"
+                                      />
+                                    </a>
                                   ) : null}
 
                                   <span className="text-[11px] text-zinc-500">
@@ -1259,7 +1301,14 @@ function CodeforcesSyncContent({
                       {res.error}
                     </p>
                   ) : (
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-center sm:grid-cols-5">
+                    <div
+                      className={cn(
+                        "mt-3 grid grid-cols-2 gap-2 text-center",
+                        res.summary.updatedSolutionLinks > 0
+                          ? "sm:grid-cols-6"
+                          : "sm:grid-cols-5"
+                      )}
+                    >
                       <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
                         <p className="text-lg font-bold text-emerald-400">
                           {res.summary.createdSolved}
@@ -1284,6 +1333,16 @@ function CodeforcesSyncContent({
                           Upsolvings
                         </p>
                       </div>
+                      {res.summary.updatedSolutionLinks > 0 ? (
+                        <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                          <p className="text-lg font-bold text-teal-400">
+                            {res.summary.updatedSolutionLinks}
+                          </p>
+                          <p className="text-[11px] text-zinc-400">
+                            Links atualiz.
+                          </p>
+                        </div>
+                      ) : null}
                       <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
                         <p className="text-lg font-bold text-indigo-400">
                           {res.summary.proposalsUpdated}

@@ -6,8 +6,11 @@ import { requireTeamMember } from "@/lib/auth";
 import { CACHE_TAGS, getCachedTopics } from "@/lib/cache";
 import {
   aggregateCodeforcesSubmissions,
+  buildCodeforcesSubmissionUrl,
+  extractCodeforcesGroupCode,
   fetchCodeforcesProblem,
   fetchCodeforcesUserStatus,
+  fetchUserCodeforcesAcceptedSubmission,
   formatCodeforcesTitle,
   mapCfRatingToDifficulty,
   mapCfTagsToTopicIds,
@@ -15,7 +18,12 @@ import {
 } from "@/lib/codeforces";
 import { NotificationService } from "@/lib/notifications";
 import { prisma } from "@/lib/prisma";
-import { sanitizeHttpUrl } from "@/lib/url";
+import {
+  MAX_SOLUTION_CODE_LENGTH,
+  normalizeOptionalSolutionCode,
+  normalizeOptionalSolutionUrl,
+  sanitizeHttpUrl,
+} from "@/lib/url";
 import type { TopicItem } from "@/types";
 
 const MAX_BATCH_ITEMS = 500;
@@ -27,6 +35,7 @@ export type SyncItemAction =
   | "NEW_ATTEMPTED"
   | "UPSOLVE_REVIEW"
   | "UPDATE_ATTEMPTS"
+  | "UPDATE_SOLUTION_LINK"
   | "LINK_PROPOSAL";
 
 export interface SyncMatchingProposalInfo {
@@ -57,6 +66,8 @@ export interface SyncPreviewItem {
   existingLogId: string | null;
   existingAttemptCount: number | null;
   notes: string;
+  solutionUrl: string | null;
+  solutionCode?: string | null;
   matchingProposals: SyncMatchingProposalInfo[];
 }
 
@@ -86,6 +97,8 @@ export interface SyncCommitItem {
   activityAt: string;
   existingLogId: string | null;
   notes: string;
+  solutionUrl: string | null;
+  solutionCode?: string | null;
 }
 
 export interface BatchCommitSummary {
@@ -93,6 +106,7 @@ export interface BatchCommitSummary {
   createdAttempted: number;
   upsolvedReview: number;
   updatedAttempts: number;
+  updatedSolutionLinks: number;
   proposalsUpdated: number;
   skippedDuplicates: number;
 }
@@ -107,6 +121,18 @@ export interface CodeforcesLookupResult {
   suggestedDifficulty: Difficulty | null;
   matchedTopicIds: string[];
   rawTags: string[];
+  userSolutionUrl: string | null;
+  cfHandle: string | null;
+  cfHandleConfigured: boolean;
+  solutionLookupError?: string | null;
+}
+
+export interface UserCfSubmissionLookupResult {
+  solutionUrl: string | null;
+  cfHandle: string | null;
+  cfHandleConfigured: boolean;
+  isCodeforces: boolean;
+  error?: string;
 }
 
 const FALLBACK_TOPICS_TO_ENSURE = [
@@ -177,7 +203,7 @@ export async function lookupCodeforcesProblemAction(rawInput: string): Promise<{
   data?: CodeforcesLookupResult;
   error?: string;
 }> {
-  await requireTeamMember();
+  const user = await requireTeamMember();
 
   const ref = parseCodeforcesRef(rawInput);
   if (!ref) {
@@ -205,6 +231,23 @@ export async function lookupCodeforcesProblemAction(rawInput: string): Promise<{
     "implementacao-ad-hoc"
   );
 
+  const cfHandle = user.cfHandle?.trim() || null;
+  const cfHandleConfigured = Boolean(cfHandle);
+  let userSolutionUrl: string | null = null;
+  let solutionLookupError: string | null = null;
+
+  if (cfHandle) {
+    const groupCode = extractCodeforcesGroupCode(rawInput, problem.contestId);
+    const submissionRes = await fetchUserCodeforcesAcceptedSubmission(
+      cfHandle,
+      problem.contestId,
+      problem.index,
+      { groupCode, timeoutMs: 8_000 }
+    );
+    userSolutionUrl = submissionRes.solutionUrl;
+    solutionLookupError = submissionRes.error ?? null;
+  }
+
   return {
     data: {
       title: formatCodeforcesTitle(
@@ -220,7 +263,54 @@ export async function lookupCodeforcesProblemAction(rawInput: string): Promise<{
       suggestedDifficulty: mapCfRatingToDifficulty(problem.rating),
       matchedTopicIds,
       rawTags: problem.tags,
+      userSolutionUrl,
+      cfHandle,
+      cfHandleConfigured,
+      solutionLookupError,
     },
+  };
+}
+
+export async function lookupUserCodeforcesSubmissionAction(
+  rawInput: string
+): Promise<UserCfSubmissionLookupResult> {
+  const user = await requireTeamMember();
+  const cfHandle = user.cfHandle?.trim() || null;
+  const cfHandleConfigured = Boolean(cfHandle);
+
+  const ref = parseCodeforcesRef(rawInput);
+  if (!ref) {
+    return {
+      solutionUrl: null,
+      cfHandle,
+      cfHandleConfigured,
+      isCodeforces: false,
+    };
+  }
+
+  if (!cfHandle) {
+    return {
+      solutionUrl: null,
+      cfHandle: null,
+      cfHandleConfigured: false,
+      isCodeforces: true,
+    };
+  }
+
+  const groupCode = extractCodeforcesGroupCode(rawInput, ref.contestId);
+  const submissionRes = await fetchUserCodeforcesAcceptedSubmission(
+    cfHandle,
+    ref.contestId,
+    ref.index,
+    { groupCode, timeoutMs: 8_000 }
+  );
+
+  return {
+    solutionUrl: submissionRes.solutionUrl,
+    cfHandle,
+    cfHandleConfigured: true,
+    isCodeforces: true,
+    error: submissionRes.error,
   };
 }
 
@@ -288,6 +378,7 @@ export async function previewMemberCodeforcesSyncAction(params: {
         needsReview: true,
         attemptCount: true,
         notes: true,
+        solutionUrl: true,
         updatedAt: true,
         topics: { select: { id: true } },
       },
@@ -360,6 +451,21 @@ export async function previewMemberCodeforcesSyncAction(params: {
       })
     );
 
+    let resolvedSolutionUrl: string | null = item.solutionUrl;
+    if (item.solved && item.acceptedSubmissionId !== null && existingLog) {
+      const groupCode = extractCodeforcesGroupCode(
+        existingLog.url,
+        item.contestId
+      );
+      if (groupCode) {
+        resolvedSolutionUrl = buildCodeforcesSubmissionUrl(
+          item.contestId,
+          item.acceptedSubmissionId,
+          groupCode
+        );
+      }
+    }
+
     const mappedTopics = mapCfTagsToTopicIds(
       item.tags,
       allTopics,
@@ -392,6 +498,7 @@ export async function previewMemberCodeforcesSyncAction(params: {
           existingLogId: null,
           existingAttemptCount: null,
           notes: "",
+          solutionUrl: resolvedSolutionUrl,
           matchingProposals,
         });
       } else {
@@ -423,6 +530,7 @@ export async function previewMemberCodeforcesSyncAction(params: {
           existingLogId: null,
           existingAttemptCount: null,
           notes: "",
+          solutionUrl: null,
           matchingProposals,
         });
       }
@@ -463,6 +571,7 @@ export async function previewMemberCodeforcesSyncAction(params: {
           existingLogId: existingLog.id,
           existingAttemptCount: existingLog.attemptCount,
           notes: existingLog.notes ?? "",
+          solutionUrl: resolvedSolutionUrl,
           matchingProposals,
         });
         continue;
@@ -489,6 +598,7 @@ export async function previewMemberCodeforcesSyncAction(params: {
           existingLogId: existingLog.id,
           existingAttemptCount: existingLog.attemptCount,
           notes: existingLog.notes ?? "",
+          solutionUrl: resolvedSolutionUrl,
           matchingProposals,
         });
         continue;
@@ -515,6 +625,34 @@ export async function previewMemberCodeforcesSyncAction(params: {
           existingLogId: existingLog.id,
           existingAttemptCount: existingLog.attemptCount,
           notes: existingLog.notes ?? "",
+          solutionUrl: resolvedSolutionUrl,
+          matchingProposals: [],
+        });
+        continue;
+      }
+
+      if (!existingLog.solutionUrl && resolvedSolutionUrl) {
+        items.push({
+          key: `${targetMember.id}:${item.externalId}`,
+          memberId: targetMember.id,
+          memberName: targetMember.name,
+          externalId: item.externalId,
+          code: item.code,
+          title: item.title,
+          canonicalUrl: item.canonicalUrl,
+          rating: item.rating,
+          rawTags: item.tags,
+          action: "UPDATE_SOLUTION_LINK",
+          solved: true,
+          needsReview: existingLog.needsReview,
+          attemptCount: existingLog.attemptCount,
+          perceivedDifficulty: existingLog.perceivedDifficulty,
+          topicIds: existingTopicIds,
+          activityAt: item.activityAt,
+          existingLogId: existingLog.id,
+          existingAttemptCount: existingLog.attemptCount,
+          notes: existingLog.notes ?? "",
+          solutionUrl: resolvedSolutionUrl,
           matchingProposals: [],
         });
         continue;
@@ -552,6 +690,7 @@ export async function previewMemberCodeforcesSyncAction(params: {
         existingLogId: existingLog.id,
         existingAttemptCount: existingLog.attemptCount,
         notes: existingLog.notes ?? "",
+        solutionUrl: null,
         matchingProposals,
       });
       continue;
@@ -596,6 +735,8 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
       safeUrl: string;
       cleanTitle: string;
       cleanNotes: string | null;
+      cleanSolutionUrl: string | null;
+      cleanSolutionCode: string | null;
     }
   > = [];
 
@@ -618,11 +759,34 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
         error: `Observação do item "${cleanTitle}" excede o limite de ${MAX_NOTES_LENGTH} caracteres.`,
       };
     }
+
+    let cleanSolutionUrl: string | null = null;
+    let cleanSolutionCode: string | null = null;
+    if (item.solved) {
+      const urlCheck = normalizeOptionalSolutionUrl(item.solutionUrl);
+      if (urlCheck.invalid) {
+        return {
+          error: `Link de resolução inválido detectado no item "${cleanTitle}".`,
+        };
+      }
+      cleanSolutionUrl = urlCheck.value;
+
+      const codeCheck = normalizeOptionalSolutionCode(item.solutionCode);
+      if (codeCheck.tooLong) {
+        return {
+          error: `Código da solução do item "${cleanTitle}" excede o limite de ${MAX_SOLUTION_CODE_LENGTH} caracteres.`,
+        };
+      }
+      cleanSolutionCode = codeCheck.value;
+    }
+
     sanitizedItems.push({
       ...item,
       safeUrl,
       cleanTitle,
       cleanNotes,
+      cleanSolutionUrl,
+      cleanSolutionCode,
     });
   }
 
@@ -644,6 +808,7 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
     createdAttempted: 0,
     upsolvedReview: 0,
     updatedAttempts: 0,
+    updatedSolutionLinks: 0,
     proposalsUpdated: 0,
     skippedDuplicates: 0,
   };
@@ -666,6 +831,7 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
           attemptCount: true,
           solved: true,
           notes: true,
+          solutionUrl: true,
         },
       }),
       prisma.proposedProblem.findMany({
@@ -853,6 +1019,8 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
                 needsReview: !isSolved,
                 attemptCount,
                 notes: trimmedNotes,
+                solutionUrl: isSolved ? item.cleanSolutionUrl : null,
+                solutionCode: isSolved ? item.cleanSolutionCode : null,
                 createdAt: safeActivityDate,
                 topics: {
                   connect: cleanTopics.map((id) => ({ id })),
@@ -869,6 +1037,7 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
               attemptCount,
               solved: isSolved,
               notes: trimmedNotes,
+              solutionUrl: isSolved ? item.cleanSolutionUrl : null,
             });
 
             if (isSolved) {
@@ -905,6 +1074,10 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
                 attemptCount: Math.max(existing.attemptCount, attemptCount),
                 perceivedDifficulty: item.perceivedDifficulty,
                 notes: trimmedNotes || existing.notes,
+                solutionUrl: item.cleanSolutionUrl ?? existing.solutionUrl,
+                ...(item.cleanSolutionCode !== null
+                  ? { solutionCode: item.cleanSolutionCode }
+                  : {}),
                 externalId: existing.externalId ?? item.externalId,
                 externalRating: existing.externalRating ?? rating,
                 ...(cleanTopics.length > 0
@@ -942,12 +1115,20 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
               return;
             }
 
+            const shouldBackfillSolutionUrl =
+              existing.solved &&
+              !existing.solutionUrl &&
+              Boolean(item.cleanSolutionUrl);
+
             await prisma.problemLog.update({
               where: { id: existing.id },
               data: {
                 attemptCount: Math.max(existing.attemptCount, attemptCount),
                 externalId: existing.externalId ?? item.externalId,
                 externalRating: existing.externalRating ?? rating,
+                ...(shouldBackfillSolutionUrl
+                  ? { solutionUrl: item.cleanSolutionUrl }
+                  : {}),
               },
             });
 
@@ -957,6 +1138,30 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
               existing.id,
               existing.solved ? "FEITO" : "TENTOU"
             );
+            return;
+          }
+
+          if (item.action === "UPDATE_SOLUTION_LINK") {
+            const existing =
+              (item.existingLogId
+                ? existingById.get(item.existingLogId)
+                : undefined) ?? existingByExternalId.get(item.externalId);
+
+            if (!existing || !existing.solved || !item.cleanSolutionUrl) {
+              summary.skippedDuplicates += 1;
+              return;
+            }
+
+            await prisma.problemLog.update({
+              where: { id: existing.id },
+              data: {
+                solutionUrl: item.cleanSolutionUrl,
+                externalId: existing.externalId ?? item.externalId,
+                externalRating: existing.externalRating ?? rating,
+              },
+            });
+
+            summary.updatedSolutionLinks += 1;
             return;
           }
 
@@ -971,10 +1176,16 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
               return;
             }
 
+            const shouldBackfillSolutionUrl =
+              existing.solved &&
+              !existing.solutionUrl &&
+              Boolean(item.cleanSolutionUrl);
+
             if (
               attemptCount > existing.attemptCount ||
               !existing.externalId ||
-              (rating !== null && existing.externalRating !== rating)
+              (rating !== null && existing.externalRating !== rating) ||
+              shouldBackfillSolutionUrl
             ) {
               await prisma.problemLog.update({
                 where: { id: existing.id },
@@ -982,6 +1193,9 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
                   attemptCount: Math.max(existing.attemptCount, attemptCount),
                   externalId: existing.externalId ?? item.externalId,
                   externalRating: existing.externalRating ?? rating,
+                  ...(shouldBackfillSolutionUrl
+                    ? { solutionUrl: item.cleanSolutionUrl }
+                    : {}),
                 },
               });
             }
@@ -1014,6 +1228,7 @@ export async function commitMemberCodeforcesSyncBatchAction(params: {
 
     revalidatePath("/");
     revalidatePath("/questoes");
+    revalidatePath("/questoes/[id]", "page");
     revalidatePath("/revisao");
     revalidatePath("/propostos");
     revalidatePath("/notificacoes");

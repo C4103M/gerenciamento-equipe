@@ -44,6 +44,8 @@ export interface AggregatedCfProblem {
   activityAt: string;
   withinGraceWindow: boolean;
   latestSubmissionId: number;
+  acceptedSubmissionId: number | null;
+  solutionUrl: string | null;
 }
 
 interface NormalizedCfProblem {
@@ -266,6 +268,75 @@ export function parseCodeforcesRef(raw: string): CodeforcesProblemRef | null {
     externalId,
     canonicalUrl,
   };
+}
+
+export function buildCodeforcesSubmissionUrl(
+  contestId: number,
+  submissionId: number,
+  groupCode?: string | null
+): string {
+  if (groupCode) {
+    return `https://codeforces.com/group/${groupCode}/contest/${contestId}/submission/${submissionId}`;
+  }
+  if (contestId >= 100000) {
+    return `https://codeforces.com/gym/${contestId}/submission/${submissionId}`;
+  }
+  return `https://codeforces.com/contest/${contestId}/submission/${submissionId}`;
+}
+
+export function extractCodeforcesGroupCode(
+  url: string,
+  contestId?: number
+): string | null {
+  const match = url.match(
+    /codeforces\.com\/group\/([A-Za-z0-9]+)\/contest\/(\d+)/i
+  );
+  if (!match) return null;
+  if (
+    typeof contestId === "number" &&
+    Number.parseInt(match[2], 10) !== contestId
+  ) {
+    return null;
+  }
+  return match[1];
+}
+
+const CF_SUBMISSION_URL_RE =
+  /^https:\/\/codeforces\.com\/(?:contest\/(\d+)|gym\/(\d+)|group\/[A-Za-z0-9]+\/contest\/(\d+))\/submission\/(\d+)\/?$/i;
+
+/**
+ * Verifies that a URL is an official Codeforces submission link built by the system
+ * (contest, gym, or group contest) and optionally belongs to `expectedContestId`.
+ */
+export function isValidCodeforcesSubmissionUrl(
+  url: string,
+  expectedContestId?: number
+): boolean {
+  const match = url.trim().match(CF_SUBMISSION_URL_RE);
+  if (!match) return false;
+
+  const contestStr = match[1] ?? match[2] ?? match[3];
+  const submissionStr = match[4];
+  const contestId = Number.parseInt(contestStr, 10);
+  const submissionId = Number.parseInt(submissionStr, 10);
+
+  if (
+    !Number.isFinite(contestId) ||
+    contestId <= 0 ||
+    !Number.isFinite(submissionId) ||
+    submissionId <= 0
+  ) {
+    return false;
+  }
+
+  if (
+    typeof expectedContestId === "number" &&
+    contestId !== expectedContestId
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 export function formatCodeforcesTitle(
@@ -611,6 +682,145 @@ export async function fetchCodeforcesUserStatus(
   }
 }
 
+/**
+ * Finds the user's latest accepted submission (OK) for a specific Codeforces problem
+ * and returns its assembled submission URL.
+ */
+export async function fetchUserCodeforcesAcceptedSubmission(
+  handle: string,
+  contestId: number,
+  index: string,
+  options?: {
+    groupCode?: string | null;
+    timeoutMs?: number;
+  }
+): Promise<{
+  solutionUrl: string | null;
+  submissionId: number | null;
+  error?: string;
+}> {
+  const cleanHandle = handle.trim();
+  const targetIndex = index.trim().toUpperCase();
+  if (
+    !cleanHandle ||
+    !Number.isFinite(contestId) ||
+    contestId <= 0 ||
+    !targetIndex
+  ) {
+    return { solutionUrl: null, submissionId: null };
+  }
+
+  const pickLatestOk = (submissions: CfApiSubmission[]): CfApiSubmission | null => {
+    let latest: CfApiSubmission | null = null;
+    for (const sub of submissions) {
+      const subContestId = sub.contestId ?? sub.problem?.contestId;
+      const subIndex = sub.problem?.index?.trim().toUpperCase();
+      if (
+        sub.verdict !== "OK" ||
+        subContestId !== contestId ||
+        subIndex !== targetIndex ||
+        typeof sub.id !== "number" ||
+        !Number.isFinite(sub.id) ||
+        sub.id <= 0
+      ) {
+        continue;
+      }
+      if (
+        !latest ||
+        sub.creationTimeSeconds > latest.creationTimeSeconds ||
+        (sub.creationTimeSeconds === latest.creationTimeSeconds &&
+          sub.id > latest.id)
+      ) {
+        latest = sub;
+      }
+    }
+    return latest;
+  };
+
+  const toResult = (sub: CfApiSubmission | null) => {
+    if (!sub) {
+      return { solutionUrl: null, submissionId: null };
+    }
+    const okContestId = sub.contestId ?? sub.problem?.contestId ?? contestId;
+    return {
+      solutionUrl: buildCodeforcesSubmissionUrl(
+        okContestId,
+        sub.id,
+        options?.groupCode
+      ),
+      submissionId: sub.id,
+    };
+  };
+
+  if (contestId < 100000 && !options?.groupCode) {
+    const paramsObj = {
+      contestId: String(contestId),
+      handle: cleanHandle,
+    };
+    const credentials = getCodeforcesApiCredentials();
+    const endpoint = credentials
+      ? await buildSignedCodeforcesUrl("contest.status", paramsObj, credentials)
+      : `https://codeforces.com/api/contest.status?${new URLSearchParams(paramsObj).toString()}`;
+
+    try {
+      const res = await fetch(endpoint, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(options?.timeoutMs ?? 10_000),
+        headers: { Accept: "application/json" },
+      });
+
+      if (res.status === 503 || res.status === 429) {
+        return {
+          solutionUrl: null,
+          submissionId: null,
+          error:
+            "A API do Codeforces está limitando requisições no momento. Aguarde alguns segundos e tente novamente.",
+        };
+      }
+
+      const data = (await res.json()) as {
+        status?: string;
+        comment?: string;
+        result?: CfApiSubmission[];
+      };
+
+      if (data.status === "OK" && Array.isArray(data.result)) {
+        return toResult(pickLatestOk(data.result));
+      }
+
+      if (data.comment?.toLowerCase().includes("call limit exceeded")) {
+        return {
+          solutionUrl: null,
+          submissionId: null,
+          error: translateCodeforcesApiComment(data.comment),
+        };
+      }
+      // Non-rate-limit failures (e.g., "Contest not found") fall back to user.status below.
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        return {
+          solutionUrl: null,
+          submissionId: null,
+          error:
+            "Tempo esgotado ao buscar sua submissão no Codeforces. Tente novamente.",
+        };
+      }
+      // Fall through to user.status fallback on transient fetch errors.
+    }
+  }
+
+  const fallback = await fetchCodeforcesUserStatus(cleanHandle, 200);
+  if (fallback.submissions) {
+    return toResult(pickLatestOk(fallback.submissions));
+  }
+
+  return {
+    solutionUrl: null,
+    submissionId: null,
+    error: fallback.error,
+  };
+}
+
 export function aggregateCodeforcesSubmissions(
   submissions: CfApiSubmission[],
   graceMinutes: number,
@@ -657,6 +867,16 @@ export function aggregateCodeforcesSubmissions(
     const firstOkIdx = countable.findIndex((s) => s.verdict === "OK");
     const solved = firstOkIdx !== -1;
 
+    let latestOkSub: CfApiSubmission | null = null;
+    if (solved) {
+      for (let i = countable.length - 1; i >= 0; i--) {
+        if (countable[i].verdict === "OK") {
+          latestOkSub = countable[i];
+          break;
+        }
+      }
+    }
+
     const latestSub = list[list.length - 1];
     const sampleProblem =
       list.find((s) => typeof s.problem?.rating === "number")?.problem ??
@@ -672,6 +892,20 @@ export function aggregateCodeforcesSubmissions(
     const canonicalUrl = isGym
       ? `https://codeforces.com/gym/${contestId}/problem/${index}`
       : `https://codeforces.com/problemset/problem/${contestId}/${index}`;
+
+    const acceptedSubmissionId =
+      latestOkSub &&
+      typeof latestOkSub.id === "number" &&
+      Number.isFinite(latestOkSub.id) &&
+      latestOkSub.id > 0
+        ? latestOkSub.id
+        : null;
+    const okContestId =
+      latestOkSub?.contestId ?? latestOkSub?.problem?.contestId ?? contestId;
+    const solutionUrl =
+      solved && acceptedSubmissionId !== null
+        ? buildCodeforcesSubmissionUrl(okContestId, acceptedSubmissionId)
+        : null;
 
     const attemptCount = solved
       ? Math.max(1, firstOkIdx + 1)
@@ -705,6 +939,8 @@ export function aggregateCodeforcesSubmissions(
       activityAt: new Date(activityMs).toISOString(),
       withinGraceWindow,
       latestSubmissionId: latestSub.id,
+      acceptedSubmissionId,
+      solutionUrl,
     });
   }
 

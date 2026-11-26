@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Code2,
   ExternalLink,
   Info,
   Loader2,
@@ -95,6 +96,7 @@ function emptyBatchSummary(): BatchCommitSummary {
     createdAttempted: 0,
     upsolvedReview: 0,
     updatedAttempts: 0,
+    updatedSolutionLinks: 0,
     proposalsUpdated: 0,
     skippedDuplicates: 0,
   };
@@ -109,6 +111,8 @@ function mergeBatchSummary(
     createdAttempted: target.createdAttempted + delta.createdAttempted,
     upsolvedReview: target.upsolvedReview + delta.upsolvedReview,
     updatedAttempts: target.updatedAttempts + delta.updatedAttempts,
+    updatedSolutionLinks:
+      target.updatedSolutionLinks + delta.updatedSolutionLinks,
     proposalsUpdated: target.proposalsUpdated + delta.proposalsUpdated,
     skippedDuplicates: target.skippedDuplicates + delta.skippedDuplicates,
   };
@@ -131,6 +135,8 @@ function toCommitItem(
     activityAt: item.activityAt,
     existingLogId: item.existingLogId,
     notes: item.notes,
+    solutionUrl: null,
+    solutionCode: item.solved ? item.solutionCode : null,
   };
 }
 
@@ -153,6 +159,10 @@ const ACTION_BADGE_META: Record<
   UPDATE_ATTEMPTS: {
     label: "Atualiza Tentativas",
     className: "border-zinc-700 bg-zinc-800/90 text-zinc-200",
+  },
+  UPDATE_SOLUTION_LINK: {
+    label: "Link Resolução",
+    className: "border-teal-500/30 bg-teal-500/15 text-teal-300",
   },
   LINK_PROPOSAL: {
     label: "Vincula Proposta",
@@ -231,6 +241,9 @@ function LeetCodeSyncContent({
   const [memberFilterId, setMemberFilterId] = useState<string>("ALL");
   const [typeFilter, setTypeFilter] = useState<TriageTypeFilter>("ALL");
   const [expandedTopicKey, setExpandedTopicKey] = useState<string | null>(null);
+  const [expandedSolutionKey, setExpandedSolutionKey] = useState<string | null>(
+    null
+  );
   const [page, setPage] = useState(1);
 
   const [executionResults, setExecutionResults] = useState<
@@ -392,6 +405,7 @@ function LeetCodeSyncContent({
       setMemberFilterId("ALL");
       setTypeFilter("ALL");
       setExpandedTopicKey(null);
+      setExpandedSolutionKey(null);
       setPage(1);
       setStep("triage");
     } catch {
@@ -612,7 +626,12 @@ function LeetCodeSyncContent({
     patch: Partial<
       Pick<
         TriageItemState,
-        "selected" | "perceivedDifficulty" | "attemptCount" | "topicIds" | "notes"
+        | "selected"
+        | "perceivedDifficulty"
+        | "attemptCount"
+        | "topicIds"
+        | "notes"
+        | "solutionCode"
       >
     >
   ) {
@@ -1000,6 +1019,9 @@ function LeetCodeSyncContent({
                     {paginatedTriageItems.map((item) => {
                       const actionMeta = ACTION_BADGE_META[item.action];
                       const isTopicsExpanded = expandedTopicKey === item.key;
+                      const isSolutionExpanded =
+                        expandedSolutionKey === item.key;
+                      const hasSolutionData = Boolean(item.solutionCode.trim());
                       const resolvedTopics = item.topicIds
                         .map((id) => topicMap.get(id))
                         .filter((t): t is TopicItem => Boolean(t));
@@ -1155,6 +1177,31 @@ function LeetCodeSyncContent({
                                 <Tag className="h-3 w-3" />
                                 <span>{resolvedTopics.length} tópicos</span>
                               </button>
+
+                              {item.solved ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedSolutionKey((prev) =>
+                                      prev === item.key ? null : item.key
+                                    )
+                                  }
+                                  disabled={!item.selected || isRunning}
+                                  className={cn(
+                                    "inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors",
+                                    isSolutionExpanded || hasSolutionData
+                                      ? "border-amber-500/50 bg-amber-500/15 text-amber-200"
+                                      : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                                  )}
+                                >
+                                  <Code2 className="h-3 w-3" />
+                                  <span>
+                                    {hasSolutionData
+                                      ? "Solução preenchida"
+                                      : "Colar solução"}
+                                  </span>
+                                </button>
+                              ) : null}
                             </div>
                           </div>
 
@@ -1203,6 +1250,31 @@ function LeetCodeSyncContent({
                                     topicIds: nextIds,
                                   })
                                 }
+                              />
+                            </div>
+                          ) : null}
+
+                          {item.solved && isSolutionExpanded ? (
+                            <div className="space-y-1.5 rounded-xl border border-zinc-800 bg-zinc-900/90 p-3 pl-7">
+                              <label
+                                htmlFor={`lc-sync-sol-code-${item.key}`}
+                                className="block text-[11px] font-medium text-zinc-300"
+                              >
+                                Colar solução (opcional)
+                              </label>
+                              <textarea
+                                id={`lc-sync-sol-code-${item.key}`}
+                                rows={5}
+                                spellCheck={false}
+                                value={item.solutionCode}
+                                onChange={(e) =>
+                                  updateTriageItem(item.key, {
+                                    solutionCode: e.target.value,
+                                  })
+                                }
+                                disabled={!item.selected || isRunning}
+                                placeholder="Cole aqui seu código aceito para compartilhar com a equipe..."
+                                className="w-full resize-y rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-2 font-mono text-xs leading-relaxed text-zinc-100 placeholder:text-zinc-500 focus:border-amber-500 focus:outline-none"
                               />
                             </div>
                           ) : null}

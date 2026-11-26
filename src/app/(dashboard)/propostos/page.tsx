@@ -2,6 +2,7 @@ import { PropostosClient } from "@/components/PropostosClient";
 import { requireTeamMember } from "@/lib/auth";
 import { getCachedTeamMembers, getCachedTopics } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
+import { getLogIdsWithSolutionCode } from "@/lib/solutions";
 import type { MemberSummary, ProposedProblemItem } from "@/types";
 
 export default async function PropostosPage({
@@ -37,12 +38,25 @@ export default async function PropostosPage({
         proposer: { select: memberSelect },
         assignee: { select: memberSelect },
         topics: { select: topicSelect, orderBy: { name: "asc" } },
+        resultingLog: {
+          select: {
+            id: true,
+            solved: true,
+            solutionUrl: true,
+          },
+        },
       },
       orderBy: { createdAt: "desc" },
     }),
     getCachedTeamMembers(currentUser.teamId),
     getCachedTopics(),
   ]);
+
+  const idsWithCode = await getLogIdsWithSolutionCode(
+    proposalsRaw
+      .map((p) => (p.resultingLog?.solved ? p.resultingLog.id : ""))
+      .filter(Boolean)
+  );
 
   const proposals: ProposedProblemItem[] = proposalsRaw.map((p) => ({
     id: p.id,
@@ -55,6 +69,10 @@ export default async function PropostosPage({
     message: p.message,
     status: p.status,
     resultingLogId: p.resultingLogId,
+    solutionUrl: p.resultingLog?.solved ? p.resultingLog.solutionUrl : null,
+    hasSolutionCode: Boolean(
+      p.resultingLog?.solved && idsWithCode.has(p.resultingLog.id)
+    ),
     viewedAt: p.viewedAt ? p.viewedAt.toISOString() : null,
     createdAt: p.createdAt.toISOString(),
     updatedAt: p.updatedAt.toISOString(),

@@ -5,6 +5,8 @@ import type {
   UserRole,
 } from "@prisma/client";
 
+export type SolutionAttachMode = "link" | "code";
+
 export interface TeamSummary {
   id: string;
   name: string;
@@ -45,6 +47,8 @@ export interface ProblemLogItem {
   perceivedDifficulty: Difficulty;
   solved: boolean;
   notes: string | null;
+  solutionUrl: string | null;
+  hasSolutionCode: boolean;
   needsReview: boolean;
   reviewedAt: string | null;
   attemptCount: number;
@@ -65,6 +69,8 @@ export interface ProposedProblemItem {
   message: string | null;
   status: ProposalStatus;
   resultingLogId: string | null;
+  solutionUrl: string | null;
+  hasSolutionCode: boolean;
   viewedAt: string | null;
   createdAt: string;
   updatedAt: string;

@@ -9,7 +9,9 @@ import { parseLeetCodeRef } from "@/lib/leetcode";
 import { NotificationService } from "@/lib/notifications";
 import { detectPlatform } from "@/lib/platform";
 import { prisma } from "@/lib/prisma";
+import { resolveSubmittedSolution } from "@/lib/solutions";
 import { sanitizeHttpUrl } from "@/lib/url";
+import type { SolutionAttachMode } from "@/types";
 
 const MAX_TITLE_LENGTH = 300;
 const MAX_MESSAGE_LENGTH = 5000;
@@ -184,6 +186,10 @@ export async function updateProposalStatusAction(
     perceivedDifficulty?: Difficulty;
     notes?: string;
     attemptCount?: number;
+    solutionMode?: SolutionAttachMode;
+    solutionUrl?: string | null;
+    solutionCode?: string | null;
+    allowAutoSolutionLink?: boolean;
   }
 ): Promise<{ error?: string }> {
   const user = await requireTeamMember();
@@ -213,6 +219,23 @@ export async function updateProposalStatusAction(
   }
 
   const nextStatus = params.status;
+  const resolvedSolution =
+    nextStatus === "FEITO"
+      ? await resolveSubmittedSolution({
+          solved: true,
+          problemUrl: proposal.url,
+          userCfHandle: user.cfHandle,
+          solutionMode: params.solutionMode,
+          solutionUrl: params.solutionUrl,
+          solutionCode: params.solutionCode,
+          allowAutoResolve: params.allowAutoSolutionLink,
+        })
+      : null;
+
+  if (resolvedSolution?.error) {
+    return { error: resolvedSolution.error };
+  }
+
   const difficulty =
     params.perceivedDifficulty ?? proposal.suggestedDifficulty ?? "MEDIO";
   const topicIds = proposal.topics.map((t) => ({ id: t.id }));
@@ -239,6 +262,17 @@ export async function updateProposalStatusAction(
           reviewedAt: solved ? new Date() : null,
           attemptCount: parsedAttemptCount ?? { increment: 1 },
           notes: trimmedNotes || undefined,
+          ...(solved && resolvedSolution
+            ? {
+                solutionUrl: resolvedSolution.solutionUrl,
+                ...(resolvedSolution.updateSolutionCode
+                  ? { solutionCode: resolvedSolution.solutionCode }
+                  : {}),
+              }
+            : {
+                solutionUrl: null,
+                solutionCode: null,
+              }),
         },
       });
     } else {
@@ -263,6 +297,10 @@ export async function updateProposalStatusAction(
             (proposal.proposerId === user.id
               ? "Questão salva para fazer depois."
               : `Questão proposta por ${proposal.proposer.name}.`),
+          solutionUrl: solved ? (resolvedSolution?.solutionUrl ?? null) : null,
+          solutionCode: solved
+            ? (resolvedSolution?.solutionCode ?? null)
+            : null,
           topics: {
             connect: topicIds,
           },
@@ -298,6 +336,7 @@ export async function updateProposalStatusAction(
   updateTag(CACHE_TAGS.userNav(proposal.proposer.id));
   revalidatePath("/");
   revalidatePath("/questoes");
+  revalidatePath("/questoes/[id]", "page");
   revalidatePath("/revisao");
   revalidatePath("/propostos");
   revalidatePath("/notificacoes");

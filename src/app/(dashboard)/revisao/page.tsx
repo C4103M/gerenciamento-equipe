@@ -6,6 +6,7 @@ import {
 import { requireTeamMember } from "@/lib/auth";
 import { getCachedTeamMembers, getCachedTopics } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
+import { getLogIdsWithSolutionCode } from "@/lib/solutions";
 
 const PAGE_SIZE = 20;
 
@@ -73,7 +74,21 @@ export default async function RevisaoPage({
   const initialMemberQuery = scope === "team" ? requestedMember : "all";
   const initialWhere = buildReviewWhere(initialMemberQuery);
 
-  const reviewInclude = {
+  const reviewSelect = {
+    id: true,
+    userId: true,
+    title: true,
+    url: true,
+    platform: true,
+    perceivedDifficulty: true,
+    solved: true,
+    notes: true,
+    solutionUrl: true,
+    needsReview: true,
+    reviewedAt: true,
+    attemptCount: true,
+    createdAt: true,
+    updatedAt: true,
     user: {
       select: {
         id: true,
@@ -101,7 +116,7 @@ export default async function RevisaoPage({
         },
       },
     },
-  };
+  } as const;
 
   const [
     fetchedLogsRaw,
@@ -113,7 +128,7 @@ export default async function RevisaoPage({
   ] = await Promise.all([
     prisma.problemLog.findMany({
       where: initialWhere,
-      include: reviewInclude,
+      select: reviewSelect,
       orderBy: { createdAt: "asc" },
       take: PAGE_SIZE,
       skip: (requestedPage - 1) * PAGE_SIZE,
@@ -154,7 +169,7 @@ export default async function RevisaoPage({
     ? await Promise.all([
         prisma.problemLog.findMany({
           where: effectiveWhere,
-          include: reviewInclude,
+          select: reviewSelect,
           orderBy: { createdAt: "asc" },
           take: PAGE_SIZE,
           skip: (requestedPage - 1) * PAGE_SIZE,
@@ -170,12 +185,16 @@ export default async function RevisaoPage({
     requestedPage > totalPages && filteredCount > 0
       ? await prisma.problemLog.findMany({
           where: effectiveWhere,
-          include: reviewInclude,
+          select: reviewSelect,
           orderBy: { createdAt: "asc" },
           take: PAGE_SIZE,
           skip: (currentPage - 1) * PAGE_SIZE,
         })
       : initialLogsRaw;
+
+  const idsWithCode = await getLogIdsWithSolutionCode(
+    reviewLogsRaw.filter((log) => log.solved).map((log) => log.id)
+  );
 
   const problems: ReviewProblemItem[] = reviewLogsRaw.map((log) => {
     const externalProposal = log.fromProposals.find(
@@ -190,6 +209,8 @@ export default async function RevisaoPage({
       perceivedDifficulty: log.perceivedDifficulty,
       solved: log.solved,
       notes: log.notes,
+      solutionUrl: log.solutionUrl,
+      hasSolutionCode: idsWithCode.has(log.id),
       needsReview: log.needsReview,
       reviewedAt: log.reviewedAt ? log.reviewedAt.toISOString() : null,
       attemptCount: log.attemptCount,

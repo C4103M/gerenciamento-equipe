@@ -18,6 +18,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
 import {
@@ -34,6 +35,7 @@ import { CodeforcesSyncModal } from "@/components/CodeforcesSyncModal";
 import { LeetCodeSyncModal } from "@/components/LeetCodeSyncModal";
 import { PeriodFilterButton } from "@/components/PeriodFilterButton";
 import { ProblemFormModal } from "@/components/ProblemFormModal";
+import { SolutionLinks } from "@/components/SolutionViewerModal";
 import type { PeriodFilterValue } from "@/lib/period";
 import { DIFFICULTY_META, PLATFORM_META } from "@/lib/platform";
 import { cn, formatRelativeDate } from "@/lib/utils";
@@ -559,22 +561,32 @@ export function QuestoesClient({
               return (
                 <li
                   key={problem.id}
-                  className="rounded-xl border border-zinc-800/90 bg-zinc-900/65 p-4 transition hover:border-zinc-700/90"
+                  className="group relative rounded-xl border border-zinc-800/90 bg-zinc-900/65 p-4 transition hover:border-indigo-500/50 hover:bg-zinc-900/90"
                 >
+                  <Link
+                    href={`/questoes/${problem.id}`}
+                    aria-label={`Abrir overview de ${problem.title}`}
+                    className="absolute inset-0 z-10 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                  />
+
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                     {/* Main Content */}
                     <div className="min-w-0 flex-1 space-y-2.5">
                       {/* Title & Badges Row */}
-                      <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="min-w-0 truncate text-base font-semibold text-zinc-100 transition group-hover:text-indigo-300">
+                          {problem.title}
+                        </span>
                         <a
                           href={problem.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="group inline-flex min-w-0 items-center gap-1.5 text-base font-semibold text-zinc-100 transition hover:text-indigo-400"
+                          title="Abrir enunciado na plataforma"
+                          aria-label={`Abrir enunciado de ${problem.title}`}
+                          className="relative z-20 inline-flex shrink-0 items-center rounded-md p-1 text-zinc-500 transition hover:bg-zinc-800 hover:text-indigo-400"
                         >
-                          <span className="truncate">{problem.title}</span>
                           <ExternalLink
-                            className="h-3.5 w-3.5 shrink-0 text-zinc-500 transition group-hover:text-indigo-400"
+                            className="h-3.5 w-3.5"
                             aria-hidden="true"
                           />
                         </a>
@@ -630,7 +642,7 @@ export function QuestoesClient({
                       ) : null}
 
                       {/* Author & Metadata */}
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-zinc-400">
                         <span className="inline-flex items-center gap-2 font-medium text-zinc-300">
                           <MemberAvatar member={problem.user} size="sm" />
                           <span>{problem.user.name}</span>
@@ -648,12 +660,36 @@ export function QuestoesClient({
                             ? "tentativa"
                             : "tentativas"}
                         </span>
+
+                        {problem.solved &&
+                        (problem.solutionUrl || problem.hasSolutionCode) ? (
+                          <div className="relative z-20 inline-flex items-center">
+                            <SolutionLinks
+                              problemLogId={problem.id}
+                              title={problem.title}
+                              problemUrl={problem.url}
+                              platform={problem.platform}
+                              author={problem.user}
+                              solutionUrl={problem.solutionUrl}
+                              hasSolutionCode={problem.hasSolutionCode}
+                            />
+                          </div>
+                        ) : problem.solved && isOwner ? (
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(problem)}
+                            className="relative z-20 inline-flex items-center gap-1 rounded-md border border-dashed border-zinc-700 bg-zinc-950/60 px-2 py-0.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-indigo-500/50 hover:bg-indigo-500/10 hover:text-indigo-200"
+                          >
+                            <Plus className="h-3 w-3" aria-hidden="true" />
+                            <span>Adicionar resolução</span>
+                          </button>
+                        ) : null}
                       </div>
                     </div>
 
                     {/* Owner Actions */}
                     {isOwner ? (
-                      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-zinc-800/70 pt-2.5 lg:border-t-0 lg:pt-0">
+                      <div className="relative z-20 flex shrink-0 flex-wrap items-center gap-1.5 border-t border-zinc-800/70 pt-2.5 lg:border-t-0 lg:pt-0">
                         <button
                           type="button"
                           onClick={() => void handleToggleReview(problem)}

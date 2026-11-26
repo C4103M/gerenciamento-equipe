@@ -9,7 +9,9 @@ import { parseLeetCodeRef } from "@/lib/leetcode";
 import { NotificationService } from "@/lib/notifications";
 import { detectPlatform } from "@/lib/platform";
 import { prisma } from "@/lib/prisma";
+import { resolveSubmittedSolution } from "@/lib/solutions";
 import { sanitizeHttpUrl } from "@/lib/url";
+import type { SolutionAttachMode } from "@/types";
 
 const MAX_TITLE_LENGTH = 300;
 const MAX_NOTES_LENGTH = 10000;
@@ -22,6 +24,10 @@ export interface ProblemLogInput {
   solved: boolean;
   needsReview?: boolean;
   notes?: string;
+  solutionMode?: SolutionAttachMode;
+  solutionUrl?: string | null;
+  solutionCode?: string | null;
+  allowAutoSolutionLink?: boolean;
   attemptCount?: number;
   externalId?: string | null;
   externalRating?: number | null;
@@ -90,6 +96,19 @@ export async function createProblemLogAction(input: ProblemLogInput): Promise<{
     };
   }
 
+  const solutionCheck = await resolveSubmittedSolution({
+    solved: input.solved,
+    problemUrl: ref.url,
+    userCfHandle: user.cfHandle,
+    solutionMode: input.solutionMode,
+    solutionUrl: input.solutionUrl,
+    solutionCode: input.solutionCode,
+    allowAutoResolve: input.allowAutoSolutionLink,
+  });
+  if (solutionCheck.error) {
+    return { error: solutionCheck.error };
+  }
+
   const platform = detectPlatform(ref.url);
   const needsReview = !input.solved ? true : Boolean(input.needsReview);
 
@@ -107,6 +126,8 @@ export async function createProblemLogAction(input: ProblemLogInput): Promise<{
       needsReview,
       attemptCount,
       notes,
+      solutionUrl: solutionCheck.solutionUrl,
+      solutionCode: solutionCheck.solutionCode,
       topics: {
         connect: topicIds.map((id) => ({ id })),
       },
@@ -118,6 +139,7 @@ export async function createProblemLogAction(input: ProblemLogInput): Promise<{
   updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/");
   revalidatePath("/questoes");
+  revalidatePath("/questoes/[id]", "page");
   revalidatePath("/revisao");
   revalidatePath("/membros");
 
@@ -173,6 +195,19 @@ export async function updateProblemLogAction(
     };
   }
 
+  const solutionCheck = await resolveSubmittedSolution({
+    solved: input.solved,
+    problemUrl: ref.url,
+    userCfHandle: user.cfHandle,
+    solutionMode: input.solutionMode,
+    solutionUrl: input.solutionUrl,
+    solutionCode: input.solutionCode,
+    allowAutoResolve: input.allowAutoSolutionLink,
+  });
+  if (solutionCheck.error) {
+    return { error: solutionCheck.error };
+  }
+
   const externalRating =
     input.externalRating !== undefined
       ? typeof input.externalRating === "number" &&
@@ -200,6 +235,10 @@ export async function updateProblemLogAction(
       reviewedAt: input.solved && !needsReview ? existing.reviewedAt : null,
       attemptCount,
       notes,
+      solutionUrl: solutionCheck.solutionUrl,
+      ...(solutionCheck.updateSolutionCode
+        ? { solutionCode: solutionCheck.solutionCode }
+        : {}),
       topics: {
         set: topicIds.map((topicId) => ({ id: topicId })),
       },
@@ -210,7 +249,9 @@ export async function updateProblemLogAction(
   updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/");
   revalidatePath("/questoes");
+  revalidatePath("/questoes/[id]", "page");
   revalidatePath("/revisao");
+  revalidatePath("/propostos");
   revalidatePath("/membros");
 
   return {};
@@ -222,6 +263,10 @@ export async function resolveReviewProblemAction(
     perceivedDifficulty: Difficulty;
     notes?: string;
     attemptCount?: number;
+    solutionMode?: SolutionAttachMode;
+    solutionUrl?: string | null;
+    solutionCode?: string | null;
+    allowAutoSolutionLink?: boolean;
   }
 ): Promise<{ error?: string }> {
   const user = await requireTeamMember();
@@ -253,6 +298,19 @@ export async function resolveReviewProblemAction(
     };
   }
 
+  const solutionCheck = await resolveSubmittedSolution({
+    solved: true,
+    problemUrl: existing.url,
+    userCfHandle: user.cfHandle,
+    solutionMode: params.solutionMode,
+    solutionUrl: params.solutionUrl,
+    solutionCode: params.solutionCode,
+    allowAutoResolve: params.allowAutoSolutionLink,
+  });
+  if (solutionCheck.error) {
+    return { error: solutionCheck.error };
+  }
+
   const hasExplicitAttemptCount =
     typeof params.attemptCount === "number" &&
     Number.isFinite(params.attemptCount) &&
@@ -269,6 +327,10 @@ export async function resolveReviewProblemAction(
         : { increment: 1 },
       perceivedDifficulty: params.perceivedDifficulty,
       notes: trimmedNotes || existing.notes,
+      solutionUrl: solutionCheck.solutionUrl,
+      ...(solutionCheck.updateSolutionCode
+        ? { solutionCode: solutionCheck.solutionCode }
+        : {}),
     },
   });
 
@@ -313,6 +375,7 @@ export async function resolveReviewProblemAction(
   updateTag(CACHE_TAGS.userNav(user.id));
   revalidatePath("/");
   revalidatePath("/questoes");
+  revalidatePath("/questoes/[id]", "page");
   revalidatePath("/revisao");
   revalidatePath("/propostos");
   revalidatePath("/notificacoes");
@@ -384,4 +447,30 @@ export async function deleteProblemLogAction(
   revalidatePath("/revisao");
   revalidatePath("/membros");
   return {};
+}
+
+export async function getProblemSolutionCodeAction(
+  problemLogId: string
+): Promise<{
+  solutionCode?: string | null;
+  error?: string;
+}> {
+  const user = await requireTeamMember();
+
+  const log = await prisma.problemLog.findUnique({
+    where: { id: problemLogId },
+    select: {
+      teamId: true,
+      solved: true,
+      solutionCode: true,
+    },
+  });
+
+  if (!log || log.teamId !== user.teamId) {
+    return { error: "Questão não encontrada." };
+  }
+
+  return {
+    solutionCode: log.solved ? log.solutionCode : null,
+  };
 }
